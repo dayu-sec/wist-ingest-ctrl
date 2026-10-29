@@ -180,7 +180,8 @@ async fn guard(
         .map(|ip| ip.to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
-    let scope = wist_auth::authorize_or_response(&state.auth, required, req.headers(), &client_key)?;
+    let scope =
+        wist_auth::authorize_or_response(&state.auth, required, req.headers(), &client_key)?;
 
     req.extensions_mut().insert(scope);
     Ok(next.run(req).await)
@@ -208,7 +209,9 @@ async fn status(
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": { "code": "config_load_failed", "message": e.to_string() } })),
+                Json(
+                    json!({ "error": { "code": "config_load_failed", "message": e.to_string() } }),
+                ),
             );
         }
     };
@@ -280,7 +283,9 @@ async fn apply_handler(
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": { "code": "config_load_failed", "message": e.to_string() } })),
+                Json(
+                    json!({ "error": { "code": "config_load_failed", "message": e.to_string() } }),
+                ),
             );
         }
     };

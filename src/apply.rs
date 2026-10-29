@@ -118,10 +118,7 @@ pub async fn apply(cfg: &Config, restart: bool) -> Result<ApplyReport> {
         restarted,
         files: files.clone(),
     };
-    std::fs::write(
-        state_path(work_root),
-        serde_json::to_vec_pretty(&state)?,
-    )?;
+    std::fs::write(state_path(work_root), serde_json::to_vec_pretty(&state)?)?;
 
     Ok(ApplyReport {
         revision,

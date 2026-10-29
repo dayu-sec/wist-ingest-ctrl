@@ -95,10 +95,11 @@ async fn serve(cfg_path: PathBuf) -> Result<()> {
         None => None,
     };
 
-    let admin_token = env_admin
-        .as_deref()
-        .or(file_token.as_deref())
-        .or(cfg.ctrl.auth.admin_token.as_deref());
+    let admin_token = env_admin.as_deref().or(file_token.as_deref()).or(cfg
+        .ctrl
+        .auth
+        .admin_token
+        .as_deref());
     let viewer_token = env_viewer
         .as_deref()
         .or(cfg.ctrl.auth.viewer_token.as_deref());

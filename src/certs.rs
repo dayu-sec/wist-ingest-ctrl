@@ -29,11 +29,7 @@ pub fn inspect(cfg: &Config) -> Vec<CertFile> {
     ];
 
     if let Some(tls) = &cfg.ctrl.tls {
-        out.push(inspect_host_path(
-            "ctrl_server_cert",
-            &tls.cert_file,
-            true,
-        ));
+        out.push(inspect_host_path("ctrl_server_cert", &tls.cert_file, true));
         out.push(inspect_host_path("ctrl_server_key", &tls.key_file, false));
         if let Some(ca) = &tls.client_ca_file {
             out.push(inspect_host_path("ctrl_client_ca", ca, true));
@@ -43,7 +39,12 @@ pub fn inspect(cfg: &Config) -> Vec<CertFile> {
     out
 }
 
-fn inspect_identity(cfg: &Config, role: &'static str, container_path: &str, is_cert: bool) -> CertFile {
+fn inspect_identity(
+    cfg: &Config,
+    role: &'static str,
+    container_path: &str,
+    is_cert: bool,
+) -> CertFile {
     let mut out = blank(role, container_path, cfg.host_identity_path(container_path));
     let Some(host) = cfg.host_identity_path(container_path) else {
         out.error = Some(format!(
