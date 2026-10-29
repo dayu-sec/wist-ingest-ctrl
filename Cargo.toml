@@ -1,6 +1,6 @@
 [package]
 name = "wist-ingest-ctrl"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 license = "Apache-2.0"
 description = "Control plane for the wist-ingest data plane (warp-parse TCP+TLS source)"
@@ -26,6 +26,11 @@ tokio = { version = "1", features = [
 tokio-rustls = "0.26"
 toml = "0.8"
 tower = { version = "0.5", features = ["util"] }
+# 配置里的 `${SEC_...}` 变量解析（与 wist-center / wist-gateway 同口径）：
+# orion-sec 读 `INGEST_CTRL_SEC_FILE` 指向的密钥文件（`.wist/sec-value.yml`），
+# orion-variate 提供 `EnvDict` / `EnvEvaluable` / `EnvChecker`。
+orion-sec = "0.7"
+orion-variate = "0.14"
 # 共享原语：两者都已发布到 crates.io，按版本引（CI 发版，见各仓 release.yml）。
 # 本地联调可改成 path（与两者平铺在同一父目录时）：
 #wist-auth = { path = "../wist-auth", features = ["serde", "axum"] }

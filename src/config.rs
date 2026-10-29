@@ -1,7 +1,15 @@
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result};
+use orion_sec::sec::NoSecConv;
+use orion_sec::{SecFileFmt, load_sec_dict, load_secfile_by};
+use orion_variate::vars::{EnvChecker, EnvDict, EnvEvaluable, ValueType};
 use serde::{Deserialize, Serialize};
+
+/// 显式指定密钥文件（**绝对路径**）；未设则用 orion 默认
+/// `./.galaxy/sec_value.yml` → `~/.galaxy/sec_value.yml`。
+/// 与 wist-center 的 `WIST_CENTER_SEC_FILE` 同构。
+const SEC_FILE_ENV: &str = "INGEST_CTRL_SEC_FILE";
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
@@ -123,13 +131,96 @@ impl std::fmt::Display for ConfigInvalid {
 
 impl std::error::Error for ConfigInvalid {}
 
+/// 文本里是否还有 `${...}`（用于跳过无密钥的常见场景，不必读密钥文件）。
+fn has_placeholder(value: Option<&str>) -> bool {
+    value.is_some_and(|text| text.contains("${"))
+}
+
+/// `${VAR}` 展开用的变量表：**进程环境变量优先**，其下是密钥文件里的 `SEC_*`
+/// （`INGEST_CTRL_SEC_FILE` 指定，或 orion 默认 `.galaxy/sec_value.yml`）。
+fn secret_dict() -> Result<EnvDict> {
+    let mut dict = match std::env::var_os(SEC_FILE_ENV).filter(|v| !v.is_empty()) {
+        Some(path) => load_sec_file(Path::new(&path))?,
+        // 没显式指定且 orion 默认位置也没有：给空表，让下面的 `expand` 报“哪个变量没解析”，
+        // 而不是在这里报一个对使用者没意义的上游错误。
+        None => load_sec_dict().unwrap_or_else(|_| EnvDict::new()),
+    };
+    // 环境变量后写入 = 优先（`EnvDict` 查表优先于系统 env，故把 env 盖进去实现 env-first）。
+    for (key, value) in std::env::vars() {
+        dict.insert(key, ValueType::from(value.as_str()));
+    }
+    Ok(dict)
+}
+
+/// 从指定文件载入密钥表（YAML；键自动规范成 `SEC_<UPPER>`，与 `sys/configs/**.tpl` 的
+/// `${SEC_*}` 天然对齐）。**显式指定的文件必须存在** —— 缺了就报清楚。
+fn load_sec_file(path: &Path) -> Result<EnvDict> {
+    if !path.is_file() {
+        anyhow::bail!(
+            "secrets file not found: {}（{SEC_FILE_ENV}）",
+            path.display()
+        );
+    }
+    let space = load_secfile_by(path.to_path_buf(), SecFileFmt::Yaml)
+        .map_err(|err| anyhow::anyhow!("load secrets {}: {err}", path.display()))?;
+    let mut dict = EnvDict::new();
+    for (key, value) in space.no_sec() {
+        dict.insert(key, value);
+    }
+    Ok(dict)
+}
+
+/// 展开 `${VAR}` / `${VAR:default}`；**展开后仍含占位符 → 报错**（fail-closed）。
+fn expand(env: &EnvDict, value: &str) -> Result<String> {
+    let expanded: String = value.to_string().env_eval(env);
+    if expanded.needs_env_eval() {
+        anyhow::bail!(
+            "未解析的环境变量：{}（原文 {value:?}）",
+            expanded.list_env_vars().join(", ")
+        );
+    }
+    Ok(expanded)
+}
+
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("read config {}", path.display()))?;
-        let cfg: Config =
+        let mut cfg: Config =
             toml::from_str(&text).with_context(|| format!("parse config {}", path.display()))?;
+        cfg.expand_secrets()?;
         Ok(cfg)
+    }
+
+    /// 展开 token 里的 `${VAR}` / `${VAR:default}`（env 优先，其次密钥文件）。
+    ///
+    /// 站点配置里写 `admin_token = "${SEC_INGEST_CTRL_ADMIN_TOKEN}"`，真值只在
+    /// `.wist/sec-value.yml`（0640）里 —— 配置落盘不含秘密。**未解析就报错**（fail-closed），
+    /// 不把 `${SEC_...}` 当字面值用。
+    fn expand_secrets(&mut self) -> Result<()> {
+        let auth = &mut self.ctrl.auth;
+        let no_secret = !has_placeholder(auth.admin_token.as_deref())
+            && !has_placeholder(auth.viewer_token.as_deref());
+        if no_secret {
+            return Ok(());
+        }
+
+        let env = secret_dict()?;
+        for (role, slot) in [
+            ("admin_token", &mut auth.admin_token),
+            ("viewer_token", &mut auth.viewer_token),
+        ] {
+            if let Some(value) = slot.as_deref()
+                && has_placeholder(Some(value))
+            {
+                *slot = Some(expand(&env, value).with_context(|| {
+                    format!(
+                        "[ctrl.auth] {role} 的占位符未解析（检查 {SEC_FILE_ENV} 指向的密钥文件）"
+                    )
+                })?);
+            }
+        }
+        Ok(())
     }
 
     pub fn enabled_gateways(&self) -> impl Iterator<Item = &Gateway> {
@@ -630,6 +721,119 @@ client_ca = "/data/identity/ingest/client-ca.pem"
     fn load_reports_the_file_that_failed() {
         let err = Config::load(Path::new("/definitely/not/here/ctrl.toml")).unwrap_err();
         assert!(format!("{err:#}").contains("ctrl.toml"), "{err:#}");
+    }
+
+    // ---- `${SEC_*}` 解析（与 wist-center / wist-gateway 同口径）----
+
+    fn env_dict(pairs: &[(&str, &str)]) -> EnvDict {
+        let mut dict = EnvDict::new();
+        for (key, value) in pairs {
+            dict.insert((*key).to_string(), ValueType::from(*value));
+        }
+        dict
+    }
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "wist-ingest-ctrl-cfg-{tag}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+            ));
+            std::fs::create_dir_all(&path).expect("mkdir");
+            Self(path)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn expand_substitutes_and_keeps_defaults() {
+        let env = env_dict(&[("SEC_X", "s3cret")]);
+        assert_eq!(expand(&env, "${SEC_X}").expect("resolved"), "s3cret");
+        assert_eq!(
+            expand(&env, "a-${SEC_X}-b").expect("resolved"),
+            "a-s3cret-b"
+        );
+        assert_eq!(
+            expand(&env, "${SEC_MISSING:fallback}").expect("default"),
+            "fallback"
+        );
+    }
+
+    #[test]
+    fn expand_fails_closed_on_unresolved() {
+        let env = env_dict(&[]);
+        let err = expand(&env, "${SEC_NOPE}").expect_err("must fail");
+        assert!(err.to_string().contains("SEC_NOPE"), "{err}");
+    }
+
+    #[test]
+    fn sec_file_keys_are_normalized_to_sec_upper() {
+        let tmp = TempDir::new("secfile");
+        let path = tmp.0.join("sec-value.yml");
+        std::fs::write(&path, "ingest_ctrl_admin_token: tok-from-file\n").expect("write");
+
+        let dict = load_sec_file(&path).expect("load");
+        assert_eq!(
+            expand(&dict, "${SEC_INGEST_CTRL_ADMIN_TOKEN}").expect("resolved"),
+            "tok-from-file"
+        );
+    }
+
+    #[test]
+    fn missing_sec_file_is_reported_with_the_env_name() {
+        let tmp = TempDir::new("nosect");
+        let err = load_sec_file(&tmp.0.join("nope.yml")).expect_err("must fail");
+        assert!(err.to_string().contains(SEC_FILE_ENV), "{err}");
+    }
+
+    #[test]
+    fn config_with_placeholder_and_no_secret_is_an_error() {
+        let tmp = TempDir::new("cfgsec");
+        let path = tmp.0.join("ctrl.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "{BASE}\n[ctrl.auth]\nadmin_token = \"${{SEC_WIST_INGEST_CTRL_TEST_UNSET}}\"\n"
+            ),
+        )
+        .expect("write");
+
+        let err = Config::load(&path).expect_err("unresolved placeholder must fail");
+        let chain = format!("{err:#}");
+        assert!(chain.contains("SEC_WIST_INGEST_CTRL_TEST_UNSET"), "{chain}");
+    }
+
+    #[test]
+    fn plain_token_is_left_untouched() {
+        let tmp = TempDir::new("plain");
+        let path = tmp.0.join("ctrl.toml");
+        std::fs::write(
+            &path,
+            format!("{BASE}\n[ctrl.auth]\nadmin_token = \"literal-token\"\n"),
+        )
+        .expect("write");
+
+        let cfg = Config::load(&path).expect("load");
+        assert_eq!(cfg.ctrl.auth.admin_token.as_deref(), Some("literal-token"));
+    }
+
+    #[test]
+    fn placeholder_detection() {
+        assert!(has_placeholder(Some("${SEC_X}")));
+        assert!(has_placeholder(Some("pre-${X}")));
+        assert!(!has_placeholder(Some("plain")));
+        assert!(!has_placeholder(None));
     }
 
     #[test]

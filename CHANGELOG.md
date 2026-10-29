@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.1.3] - 2026-10-29
+
+### 新增（对齐 center / gateway 的密钥口径）
+
+- 配置里的 `${VAR}` / `${VAR:default}` 展开：token 可写
+  `admin_token = "${SEC_INGEST_CTRL_ADMIN_TOKEN}"`，真值放密钥文件，**配置落盘不含秘密**。
+  - 密钥文件路径由 `INGEST_CTRL_SEC_FILE` 指定（未设则用 orion 默认 `.galaxy/sec_value.yml`）；
+  - 键名自动规范成 `SEC_<UPPER>`（`ingest_ctrl_admin_token` → `SEC_INGEST_CTRL_ADMIN_TOKEN`）；
+  - 环境变量优先于密钥文件；**展开后仍是占位符 → 报错并拒启**（fail-closed）。
+- 依赖新增 `orion-sec` / `orion-variate`（与 wist-center / wist-gateway 同一套）。
+- systemd 单元改成指向栈根：`INGEST_CTRL_CONFIG=<栈根>/configs/ctrl/ctrl.toml`、
+  `INGEST_CTRL_SEC_FILE=<栈根>/.wist/sec-value.yml`，不再放 `/etc`。
+
+测试：78 → 85 个（新增密钥展开 / 规范化 / 失败路径）。
+
 ## [0.1.2] - 2026-10-29
 
 ### 修复（发版链路，无功能变更）

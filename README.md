@@ -69,6 +69,12 @@ Bearer token、落盘存 **sha256 hex**、常数时间比较、错 token 计入�
 | `admin` | `ctrl.auth.admin_token`（或 `admin_token_hash` / 环境变量 `INGEST_CTRL_ADMIN_TOKEN` / `INGEST_CTRL_TOKEN`） | 读 + `apply`（重启数据面） |
 | `viewer` | `ctrl.auth.viewer_token` / `viewer_token_hash` / `INGEST_CTRL_VIEWER_TOKEN` | 只读 |
 
+- **配置里写占位符，真值放密钥文件**（与 wist-center / wist-gateway 同口径）：
+  `admin_token = "${SEC_INGEST_CTRL_ADMIN_TOKEN}"`，ctrl 启动时从
+  `INGEST_CTRL_SEC_FILE`（默认 orion 的 `.galaxy/sec_value.yml`）解析；键名
+  `ingest_ctrl_admin_token` 自动规范成 `SEC_INGEST_CTRL_ADMIN_TOKEN`。
+  关键词：**展开后仍是占位符 → 拒绝启动**（fail-closed），不会把 `${SEC_...}` 当字面 token。
+  环境变量优先于密钥文件（`${VAR}` / `${VAR:default}` 都支持）。
 - **fail-closed**：两个 token 都没配且没有显式 `allow_anonymous = true` 时，进程拒绝启动；
 - `admin_token` 与 `admin_token_hash` 只能配一个（同时配 = 配置错误）；
 - 路由粒度：`/api/v1/{status,certs,whoami}` 需 `viewer`，`/api/v1/apply` 需 `admin`；

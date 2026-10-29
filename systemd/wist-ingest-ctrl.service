@@ -9,15 +9,21 @@ Type=simple
 # 但不要用 root：它只需要管理一个容器。
 User=wistingest
 Group=wistingest
-Environment=INGEST_CTRL_CONFIG=/etc/wist-ingest/ctrl.toml
-# token 从文件读，避免出现在 systemd unit 或环境里
-Environment=INGEST_CTRL_TOKEN=
-EnvironmentFile=-/etc/wist-ingest/ctrl.env
+
+# 栈根（按现场改）。配置与密钥都相对它，和 wist-center / wist-gwlinkd 同一口径：
+#   <栈根>/configs/ctrl/ctrl.toml     ← 由 sys/configs/ctrl/ctrl.toml.tpl 渲染（现场态）
+#   <栈根>/.wist/sec-value.yml        ← admin token 等密钥（0640），配置里只写 ${SEC_*}
+Environment=INGEST_CTRL_CONFIG=/opt/wist-ingest/configs/ctrl/ctrl.toml
+Environment=INGEST_CTRL_SEC_FILE=/opt/wist-ingest/.wist/sec-value.yml
+# 非密钥的现场覆盖（可选）：纯文本 KV，不要把 token 放这里。
+EnvironmentFile=-/opt/wist-ingest/configs/ctrl/ctrl.env
+
 ExecStart=/usr/local/bin/wist-ingest-ctrl serve
 Restart=on-failure
 RestartSec=3
 
-# 只读文件系统加固（可选项，按现场调整）
+# 只读文件系统加固（可选，按现场调整）。
+# 注意：栈根在 home 下（开发机）时要把 ProtectHome 关掉，否则 ctrl 看不到配置与密钥。
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
