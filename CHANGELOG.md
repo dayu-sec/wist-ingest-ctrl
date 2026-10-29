@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.2] - 2026-10-29
+
+### 修复（发版链路，无功能变更）
+
+- 镜像不在容器里 `cargo build`：复用三平台原生编译产物，单架构镜像构建从 40+ 分钟降到 30–45 秒。
+- 修正镜像 tag 拼接：`printf` 参数多于占位符时会把最后两个 tag 粘成一行，docker 报
+  `invalid reference format`。
+- `release.yml` 对齐 `wist-center`：原生双架构（`ubuntu-24.04` / `ubuntu-24.04-arm`）各自
+  `push-by-digest`，再合并多架构 manifest；**ghcr 先出**，腾讯云 TCR 后推且带 3 次重试
+  （跨境跨注册表层拷贝会 `PROTOCOL_ERROR`）。
+- 新增可选制品上传到腾讯云 COS（未配置 `vars.COS_BUCKET` 时自动跳过）。
+
 ## [0.1.1] - 2026-10-29
 
 ### Fixed

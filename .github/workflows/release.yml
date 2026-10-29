@@ -252,23 +252,27 @@ jobs:
         run: |
           # 预发布 tag（v0.1.1-alpha / -beta / -rc …）只推该 tag，**不覆盖 :latest**。
           # 注意 on.push.tags 的 `v*.*.*` 也会匹配 `v0.1.1-alpha`，不能指望触发条件区分。
-          # 两个源（ghcr / TCR）同进退。
           ghcr="ghcr.io/${{ github.repository }}"
           tcr="dy-sec.tencentcloudcr.com/cloud/wist-ingest-ctrl"
-          tags="$(printf '%s\n%s' "$ghcr:${{ github.ref_name }}" "$tcr:${{ github.ref_name }}")"
-          case "${{ github.ref_name }}" in
-            *-*)
-              ;;
+          ref="${{ github.ref_name }}"
+          # ghcr 与 TCR 分开输出：两个源的重试策略不同（见下一步）。
+          ghcr_tags="$ghcr:$ref"
+          tcr_tags="$tcr:$ref"
+          case "$ref" in
+            *-*) ;;
             *)
-              tags="$(printf '%s\n%s' "$tags" "$ghcr:latest")"
-              tags="$(printf '%s\n%s' "$tags" "$tcr:latest")"
+              ghcr_tags="$(printf '%s\n%s' "$ghcr_tags" "$ghcr:latest")"
+              tcr_tags="$(printf '%s\n%s' "$tcr_tags" "$tcr:latest")"
               ;;
           esac
-          printf 'tags<<__EOF__\n%s\n__EOF__\n' "$tags" >> "$GITHUB_OUTPUT"
+          printf 'ghcr_tags<<__EOF__\n%s\n__EOF__\n' "$ghcr_tags" >> "$GITHUB_OUTPUT"
+          printf 'tcr_tags<<__EOF__\n%s\n__EOF__\n' "$tcr_tags" >> "$GITHUB_OUTPUT"
 
-      - name: Create multi-arch manifests
+      # ghcr **先**出：wist-ingest-stack 拉的是 ghcr（INGEST_SPC=ghcr.io/dayu-sec），
+      # 不能因为 TCR 镜像失败而拿不到可用镜像。
+      - name: Create multi-arch manifest (ghcr)
         env:
-          TAGS: ${{ steps.meta.outputs.tags }}
+          TAGS: ${{ steps.meta.outputs.ghcr_tags }}
         run: |
           set -euo pipefail
           digests=()
@@ -281,6 +285,39 @@ jobs:
             [ -n "$tag" ] && args+=(-t "$tag")
           done <<< "$TAGS"
           docker buildx imagetools create "${args[@]}" "${digests[@]}"
+          while IFS= read -r tag; do
+            [ -n "$tag" ] && docker buildx imagetools inspect "$tag"
+          done <<< "$TAGS"
+
+      # 国内镜像（TCR）后推：这是跨注册表的**层拷贝**（ghcr → 腾讯云），大层在跨境链路上
+      # 很容易 `stream error; PROTOCOL_ERROR`（本仓实测同一步连续失败两次）。故重试 3 次；
+      # 重试仍失败则 job 红，但 ghcr 的镜像此时已经可用了。
+      - name: Create multi-arch manifest (TCR, with retry)
+        env:
+          TAGS: ${{ steps.meta.outputs.tcr_tags }}
+        run: |
+          set -uo pipefail
+          digests=()
+          for f in /tmp/digests/*; do
+            digests+=("ghcr.io/${{ github.repository }}@sha256:$(basename "$f")")
+          done
+          args=()
+          while IFS= read -r tag; do
+            [ -n "$tag" ] && args+=(-t "$tag")
+          done <<< "$TAGS"
+          ok=0
+          for attempt in 1 2 3; do
+            echo "::group::TCR imagetools create（第 ${attempt} 次）"
+            if docker buildx imagetools create "${args[@]}" "${digests[@]}"; then
+              echo "::endgroup::"
+              ok=1
+              break
+            fi
+            echo "::endgroup::"
+            echo "::warning::TCR 合并第 ${attempt} 次失败（ghcr 已可用），15s 后重试"
+            sleep 15
+          done
+          [ "$ok" -eq 1 ] || { echo "::error::TCR manifest 合并 3 次均失败；ghcr 镜像已发布，TCR 镜像缺失"; exit 1; }
           while IFS= read -r tag; do
             [ -n "$tag" ] && docker buildx imagetools inspect "$tag"
           done <<< "$TAGS"
