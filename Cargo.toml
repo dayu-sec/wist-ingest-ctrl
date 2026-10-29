@@ -31,4 +31,4 @@ tower = { version = "0.5", features = ["util"] }
 #wist-auth = { path = "../wist-auth", features = ["serde", "axum"] }
 #wist-pki = { path = "../wist-pki" }
 wist-auth = { git = "https://github.com/dayu-sec/wist-auth.git", tag = "v0.1.1", features = ["serde", "axum"] }
-wist-pki = { git = "https://github.com/dayu-sec/wist-pki.git", tag = "v0.1.0" }
+wist-pki = { git = "https://github.com/dayu-sec/wist-pki.git", tag = "v0.1.1" }

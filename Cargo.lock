@@ -302,7 +302,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1389,8 +1389,8 @@ dependencies = [
 
 [[package]]
 name = "wist-pki"
-version = "0.1.0"
-source = "git+https://github.com/dayu-sec/wist-pki.git?tag=v0.1.0#baacaa357b9a72f781172f4d49fe46b32c0dc8da"
+version = "0.1.1"
+source = "git+https://github.com/dayu-sec/wist-pki.git?tag=v0.1.1#97d06dea95e159474c1902e9f3e920a09383e887"
 dependencies = [
  "chrono",
  "pem",
