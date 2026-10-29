@@ -302,7 +302,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1357,7 +1357,8 @@ dependencies = [
 [[package]]
 name = "wist-auth"
 version = "0.1.1"
-source = "git+https://github.com/dayu-sec/wist-auth.git?tag=v0.1.1#5fd1765d66df3d3fe0cea6c6dcb0b84c2fc407d4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2115b61b4c87f042e6af7780362e9e8ebc9900214d4ebf0b775c0c06f4fc754c"
 dependencies = [
  "axum",
  "http",
@@ -1368,7 +1369,7 @@ dependencies = [
 
 [[package]]
 name = "wist-ingest-ctrl"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "axum",

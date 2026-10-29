@@ -63,7 +63,7 @@ async fn main() -> Result<()> {
                     f.message
                 );
             }
-            let rendered = render::render(&cfg);
+            let rendered = render::render(&cfg)?;
             for f in &rendered.files {
                 println!("\n--- {} ---\n{}", f.rel, f.content);
             }
@@ -124,6 +124,12 @@ async fn serve(cfg_path: PathBuf) -> Result<()> {
         .with_context(|| format!("invalid ctrl.listen {}", cfg.ctrl.listen))?;
 
     let tls = build_tls(&cfg)?;
+    if !auth.has_credentials() {
+        eprintln!("[!] 管理面未配置任何 token（allow_anonymous）：只读接口对能连上的任何人开放");
+    }
+    if tls.is_none() {
+        eprintln!("[!] 管理面未启用 TLS：Bearer token 出了本机会明文传输");
+    }
 
     let state = Arc::new(api::AppState {
         cfg_path: cfg_path.clone(),
@@ -189,18 +195,29 @@ fn doctor(cfg_path: PathBuf) -> Result<()> {
         }
         if let Some(na) = &c.not_after {
             println!("      notAfter={na}");
+            if let Ok(expiry) = chrono::DateTime::parse_from_rfc3339(na) {
+                let expiry = expiry.with_timezone(&chrono::Utc);
+                let now = chrono::Utc::now();
+                if expiry < now {
+                    println!("      [!] 证书已过期");
+                    failed = true;
+                } else if expiry - now < chrono::Duration::days(30) {
+                    println!("      [!] 证书 30 天内到期");
+                }
+            }
         }
         if let Some(err) = &c.error {
             println!("      error={err}");
             failed = true;
         }
-        if c.role == "server_key" {
-            if let Some(mode) = &c.mode {
-                if mode.ends_with('4') || mode.ends_with('6') || mode.ends_with('7') {
-                    println!("      [!] 私钥对 other 可读，应为 0640 或 0600");
-                    failed = true;
-                }
+        if c.role.ends_with("_key") {
+            if c.world_accessible() {
+                println!("      [!] 私钥对 other 可访问，应为 0640 或 0600");
+                failed = true;
             }
+        } else if c.world_writable() {
+            println!("      [!] 证书对 other 可写，应改为 0644 或 0640");
+            failed = true;
         }
     }
 

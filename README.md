@@ -82,10 +82,36 @@ Bearer token、落盘存 **sha256 hex**、常数时间比较、错 token 计入�
 |---|---|---|
 | `E001` | error | `ingest.client_ca` 为空 → tcp source **不会**要求客户端证书，mTLS 静默降级为单向 |
 | `E002` / `E003` | error | 服务端证书/私钥路径为空 |
-| `E004` / `E005` | error | gateway 名称重复 / 含非法字符 |
-| `W001` | warn | `framing != "len"`：多行日志会错帧 |
+| `E004` / `E005` / `E009` | error | gateway 名称重复 / 含非法字符 / 为空 |
+| `E006` | error | `ingest.port = 0`（wparse 会绑随机端口，外部连不上） |
+| `E007` | error | `ingest.bind` 为空或含空白字符 |
+| `E008` | error | `ingest.framing` 不在 `auto|line|len|length` 内（wparse 启动会失败） |
+| `E010` | error | gateway 的 `tenant` 是空白串 |
+| `E011` | error | `ctrl.container_workdir` 不是容器内绝对路径 |
+| `E012` | error | `ctrl.container` 为空 |
+| `E013` | error | `ctrl.listen` 非回环且没配 `[ctrl.tls]`（Bearer 会明文走网络） |
+| `E014` | error | `ctrl.listen` 不是合法 `SocketAddr` |
+| `W001` | warn | `framing = "line"`：payload 里的裸换行会被当记录边界 |
+| `W002` | warn | `ingest.bind` 不是 IP 字面量（域名要容器内 DNS） |
+| `W003` | warn | 证书路径不在 `<workdir>/identity/ingest/` 下：管理面看不到宿主路径/指纹 |
+| `W004` | warn | `tenant` 含空白字符（会原样进 tag） |
+| `W005` | warn | `framing = "auto"`：自动探测会在长连接里反复切换 |
+| `W006` | warn | `[ctrl.tls]` 没配 `client_ca_file`：管理面只有单向 TLS |
+| `W007` | warn | `allow_unauthenticated = true`：不出示客户端证书也放行（只剩 Bearer） |
 
 `E001` 是这套实现里最危险的一处默认行为：**漏配不报错，只是不验证客户端**。所以它被做成硬错误。
+
+落盘前还有一道 `apply` 级 preflight：`ingest.{server_cert,server_key,client_ca}` 只要能映射到宿主
+（即 `W003` 不触发），文件就必须真实存在 —— `wproj check` 不校验文件存在性，缺文件会拖到
+容器重启后才发现。preflight 失败返回 `400 config_invalid`，且**不写任何文件**。
+
+## apply 的失败分类
+
+| HTTP | code | 含义 |
+|---|---|---|
+| `400` | `config_invalid` | lint 未过 / 证书文件缺失（配置写错了） |
+| `409` | `apply_failed` | 容器内 `wproj check` 未过（**已回滚**，`state` 指向上一次成功的 revision） |
+| `500` | `apply_error` | 其它基础设施故障（写盘失败、docker 不可用、超时） |
 
 ## 已知边界
 

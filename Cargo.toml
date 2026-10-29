@@ -1,6 +1,6 @@
 [package]
 name = "wist-ingest-ctrl"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "Apache-2.0"
 description = "Control plane for the wist-ingest data plane (warp-parse TCP+TLS source)"
@@ -26,9 +26,11 @@ tokio = { version = "1", features = [
 tokio-rustls = "0.26"
 toml = "0.8"
 tower = { version = "0.5", features = ["util"] }
-# 共享原语：按 tag 引，保证单独 clone 本仓也能构建。
-# 本地联调可改成 path（与 wist-auth / wist-pki 平铺在同一父目录时）：
+# 共享原语：
+# - wist-auth 已发布到 crates.io，按版本引（CI 发版，见该仓 .github/workflows/release.yml）；
+# - wist-pki 尚未发布（release.yml 已有 publish job，下一次打 tag 会发），暂按 git tag 引。
+# 本地联调可改成 path（与两者平铺在同一父目录时）：
 #wist-auth = { path = "../wist-auth", features = ["serde", "axum"] }
 #wist-pki = { path = "../wist-pki" }
-wist-auth = { git = "https://github.com/dayu-sec/wist-auth.git", tag = "v0.1.1", features = ["serde", "axum"] }
+wist-auth = { version = "0.1.1", features = ["serde", "axum"] }
 wist-pki = { git = "https://github.com/dayu-sec/wist-pki.git", tag = "v0.1.1" }
