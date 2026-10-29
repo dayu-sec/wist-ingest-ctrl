@@ -26,11 +26,9 @@ tokio = { version = "1", features = [
 tokio-rustls = "0.26"
 toml = "0.8"
 tower = { version = "0.5", features = ["util"] }
-# 共享原语：
-# - wist-auth 已发布到 crates.io，按版本引（CI 发版，见该仓 .github/workflows/release.yml）；
-# - wist-pki 尚未发布（release.yml 已有 publish job，下一次打 tag 会发），暂按 git tag 引。
+# 共享原语：两者都已发布到 crates.io，按版本引（CI 发版，见各仓 release.yml）。
 # 本地联调可改成 path（与两者平铺在同一父目录时）：
 #wist-auth = { path = "../wist-auth", features = ["serde", "axum"] }
 #wist-pki = { path = "../wist-pki" }
 wist-auth = { version = "0.1.1", features = ["serde", "axum"] }
-wist-pki = { git = "https://github.com/dayu-sec/wist-pki.git", tag = "v0.1.1" }
+wist-pki = "0.1.2"
