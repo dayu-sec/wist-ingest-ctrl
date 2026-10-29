@@ -7,21 +7,26 @@ on:
 permissions:
   contents: read
 
+# 结构对齐 `wist-center` 的 release.yml（二进制 + 多架构镜像 + 可选 COS）。
+# 与它唯一的差异：这里出 **gnu** 目标而不是 musl —— 容器基础镜像用 debian:bookworm-slim，
+# 宿主侧是 Debian/Ubuntu 的 systemd 单元，没有跨发行版需求。要换 musl 见 wist-center 的
+# `Install musl toolchain` + `CC_*_musl` env 那段，连 Dockerfile 基础镜像一起换。
 jobs:
-  # 1. 按平台原生编译二进制，产出 tarball（直接下载 + 供 Docker 镜像用）
-  build-binaries:
+  # 1a. Linux 二进制：镜像 job 只依赖这一段，不再等 macOS。
+  build-linux:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
+          # 原生 runner 构建：amd64 在 ubuntu-24.04，arm64 在 ubuntu-24.04-arm。
           - os: ubuntu-24.04
+            arch: amd64
             target: x86_64-unknown-linux-gnu
           - os: ubuntu-24.04-arm
+            arch: arm64
             target: aarch64-unknown-linux-gnu
-          - os: macos-14
-            target: aarch64-apple-darwin
     steps:
       - uses: actions/checkout@v7
 
@@ -30,7 +35,10 @@ jobs:
           toolchain: stable
           targets: ${{ matrix.target }}
 
+      # 按 target 分缓存：产物在 target/<triple>/ 下，和宿主 build 不互相污染。
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
       - name: Cargo build
         run: cargo build --release --locked --target ${{ matrix.target }}
@@ -51,17 +59,50 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # 2. 多架构镜像：ghcr.io + 腾讯云 TCR（国内服务器拉 ghcr 很慢）
+  # 1b. macOS 二进制：只 gate GitHub Release，不阻塞镜像构建。
+  build-macos:
+    name: Build aarch64-apple-darwin
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: aarch64-apple-darwin
+
+      - name: Cargo build
+        run: cargo build --release --locked --target aarch64-apple-darwin
+
+      - name: Package tarball
+        run: |
+          mkdir -p artifacts
+          cp "target/aarch64-apple-darwin/release/wist-ingest-ctrl" artifacts/wist-ingest-ctrl
+          cp version.txt artifacts/version.txt
+          cp systemd/wist-ingest-ctrl.service artifacts/wist-ingest-ctrl.service
+          tar -czf "wist-ingest-ctrl-${{ github.ref_name }}-aarch64-apple-darwin.tar.gz" \
+            -C artifacts wist-ingest-ctrl wist-ingest-ctrl.service version.txt
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wist-ingest-ctrl-aarch64-apple-darwin
+          path: wist-ingest-ctrl-${{ github.ref_name }}-aarch64-apple-darwin.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  # 2a/2b. 原生分架构构建镜像，彻底去掉 QEMU：
+  #   amd64 → ubuntu-24.04，arm64 → ubuntu-24.04-arm，各自 push-by-digest；
+  #   最后由 docker-manifest 用 imagetools 合并成多架构 tag。
   #
-  # 与 wist-center 同构：每个架构在**原生 runner** 上单独构建并 push-by-digest
-  # （amd64 → ubuntu-24.04，arm64 → ubuntu-24.04-arm），最后由 docker-manifest
-  # 用 `imagetools create` 合成多架构 tag。
-  #
-  # 不要改回单个 job + `platforms: linux/amd64,linux/arm64`：那会让 arm64 走 QEMU，
-  # 且 multi-arch 的 push 阶段实测会挂住十几分钟。
+  # Dockerfile 只 `COPY dist/${TARGETARCH}/wist-ingest-ctrl`，二进制来自上面的 tarball，
+  # 镜像里不跑 cargo（arm64 走 QEMU 编 Rust 会超过 40 分钟）。
   docker-amd64:
     name: Docker image (linux/amd64)
-    needs: [build-binaries]
+    needs: [build-linux]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -72,14 +113,14 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: wist-ingest-ctrl-x86_64-unknown-linux-gnu
-          path: artifacts
+          path: staged
 
       - name: Stage binary for docker build
         run: |
           mkdir -p dist/amd64
-          tar -xzf "artifacts/wist-ingest-ctrl-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz" \
+          tar -xzf "staged/wist-ingest-ctrl-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz" \
             -C dist/amd64
-          ls -l dist/amd64
+          ls -lh dist/amd64
 
       - uses: docker/setup-buildx-action@v4
 
@@ -117,7 +158,7 @@ jobs:
 
   docker-arm64:
     name: Docker image (linux/arm64)
-    needs: [build-binaries]
+    needs: [build-linux]
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: read
@@ -128,14 +169,14 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: wist-ingest-ctrl-aarch64-unknown-linux-gnu
-          path: artifacts
+          path: staged
 
       - name: Stage binary for docker build
         run: |
           mkdir -p dist/arm64
-          tar -xzf "artifacts/wist-ingest-ctrl-${{ github.ref_name }}-aarch64-unknown-linux-gnu.tar.gz" \
+          tar -xzf "staged/wist-ingest-ctrl-${{ github.ref_name }}-aarch64-unknown-linux-gnu.tar.gz" \
             -C dist/arm64
-          ls -l dist/arm64
+          ls -lh dist/arm64
 
       - uses: docker/setup-buildx-action@v4
 
@@ -171,6 +212,7 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  # 2c. 合并两个架构的 digest → 多架构 manifest；ghcr 与 TCR 同一次推送。
   docker-manifest:
     name: Compose multi-arch manifest
     needs: [docker-amd64, docker-arm64]
@@ -196,6 +238,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # 国内镜像源（腾讯云 TCR）：国内服务器拉 ghcr.io 很慢，客户端改用 TCR 地址。
+      # 凭据在 TCR 控制台生成（访问凭证），存 GitHub Secrets：TCR_USERNAME / TCR_PASSWORD。
       - name: Login to TCR
         uses: docker/login-action@v4
         with:
@@ -206,23 +250,21 @@ jobs:
       - name: Compute image tags
         id: meta
         run: |
-          # 预发布 tag（v0.1.1-alpha 等）只推该 tag，不覆盖 :latest。
+          # 预发布 tag（v0.1.1-alpha / -beta / -rc …）只推该 tag，**不覆盖 :latest**。
+          # 注意 on.push.tags 的 `v*.*.*` 也会匹配 `v0.1.1-alpha`，不能指望触发条件区分。
+          # 两个源（ghcr / TCR）同进退。
           ghcr="ghcr.io/${{ github.repository }}"
           tcr="dy-sec.tencentcloudcr.com/cloud/wist-ingest-ctrl"
-          ref="${{ github.ref_name }}"
-          # 一行一个 tag。不要写成 `printf '%s\n%s' a b c`：参数多于格式里的占位符时，
-          # 第二轮从 `%s` 开始续写，会把最后两行粘成一个（`...:latest...:latest`）。
-          tags_file="${RUNNER_TEMP}/image-tags.txt"
-          printf '%s\n' "$ghcr:$ref" "$tcr:$ref" > "$tags_file"
-          case "$ref" in
-            *-*) ;;
-            *) printf '%s\n' "$ghcr:latest" "$tcr:latest" >> "$tags_file" ;;
+          tags="$(printf '%s\n%s' "$ghcr:${{ github.ref_name }}" "$tcr:${{ github.ref_name }}")"
+          case "${{ github.ref_name }}" in
+            *-*)
+              ;;
+            *)
+              tags="$(printf '%s\n%s' "$tags" "$ghcr:latest")"
+              tags="$(printf '%s\n%s' "$tags" "$tcr:latest")"
+              ;;
           esac
-          {
-            echo "tags<<__EOF__"
-            cat "$tags_file"
-            echo "__EOF__"
-          } >> "$GITHUB_OUTPUT"
+          printf 'tags<<__EOF__\n%s\n__EOF__\n' "$tags" >> "$GITHUB_OUTPUT"
 
       - name: Create multi-arch manifests
         env:
@@ -245,7 +287,7 @@ jobs:
 
   # 3. 发布 tarball 到 GitHub Release
   release:
-    needs: [build-binaries]
+    needs: [build-linux, build-macos]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -265,3 +307,99 @@ jobs:
           tag_name: ${{ github.ref_name }}
           generate_release_notes: true
           files: artifacts/*.tar.gz
+
+  # 可选：把本仓制品推到腾讯云 COS（对象存储），供按稳定 URL 拉取。
+  # 未配置 Variables（COS_BUCKET 为空）时整段自动跳过，不会让发布失败；
+  # 一旦设置 COS_BUCKET 即视为启用，此时密钥缺失会直接报错（便于发现漏配）。
+  # 注意：`secrets` 上下文不能出现在 step 级 if 里，故启用判定放在 job 级（只看 vars）。
+  #   Variables：COS_BUCKET（含 -APPID）、COS_REGION（如 ap-guangzhou）、可选 COS_PREFIX（默认取仓库名）
+  #   Secrets：  COS_SECRET_ID、COS_SECRET_KEY（临时密钥再加 COS_SESSION_TOKEN）
+  # 对象键：<COS_PREFIX>/<tag>/<文件名> 与 <COS_PREFIX>/latest/<文件名>
+  # 每个对象带自定义元数据 x-cos-meta-artifact-sha256=<hex>（COS 只存 MD5 ETag，sha256 得自带）。
+  upload-cos:
+    name: Upload artifacts to Tencent COS
+    needs: [release]
+    runs-on: ubuntu-24.04
+    if: ${{ vars.COS_BUCKET != '' }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: wist-ingest-ctrl-*
+          path: pkg
+          merge-multiple: true
+
+      - name: Install coscli
+        run: |
+          set -eu
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL -o "$HOME/.local/bin/coscli" \
+            https://github.com/tencentyun/coscli/releases/download/v1.0.9/coscli-v1.0.9-linux-amd64
+          chmod +x "$HOME/.local/bin/coscli"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/coscli" --version
+
+      - name: Upload to COS
+        env:
+          COS_BUCKET: ${{ vars.COS_BUCKET }}
+          COS_REGION: ${{ vars.COS_REGION }}
+          COS_PREFIX: ${{ vars.COS_PREFIX }}
+          COS_SECRET_ID: ${{ secrets.COS_SECRET_ID }}
+          COS_SECRET_KEY: ${{ secrets.COS_SECRET_KEY }}
+          COS_SESSION_TOKEN: ${{ secrets.COS_SESSION_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -eu
+          # 去掉密钥里的空白字符：粘贴常带入尾随换行/空格，会让签名报 SecretKey is invalid。
+          secret_id="$(printf '%s' "${COS_SECRET_ID}" | tr -d '[:space:]')"
+          secret_key="$(printf '%s' "${COS_SECRET_KEY}" | tr -d '[:space:]')"
+          session_token="$(printf '%s' "${COS_SESSION_TOKEN}" | tr -d '[:space:]')"
+          # 明文写入 AK/SK，因此必须显式关掉 coscli 的密钥加密（disableencryption）。
+          cat > "$HOME/.cos.yaml" <<EOF
+          cos:
+            base:
+              protocol: https
+              disableencryption: "true"
+              secretid: "${secret_id}"
+              secretkey: "${secret_key}"
+              sessiontoken: "${session_token}"
+            buckets:
+              - name: "${COS_BUCKET}"
+                alias: "${COS_BUCKET}"
+                region: "${COS_REGION}"
+                endpoint: "cos.${COS_REGION}.myqcloud.com"
+          EOF
+          prefix="${COS_PREFIX:-${GITHUB_REPOSITORY##*/}}"
+          prefix="${prefix%/}"
+          cfg="$HOME/.cos.yaml"
+          out="$PWD/coscli_output"
+          rm -rf "${out}"
+          # coscli 只打印汇总，失败明细落在 coscli_output/<时间>/ 下；失败时打印并输出为 annotation。
+          dump_err() {
+            echo "::error::$1"
+            if [ -d "${out}" ]; then
+              find "${out}" -type f -exec sh -c 'echo "--- $1"; cat "$1"' _ {} \;
+              detail="$(find "${out}" -type f -exec cat {} \; | tr '\n' ' ' | sed -e 's/%/%25/g' | cut -c1-1500)"
+              echo "::error title=coscli 明细::$1 —— ${detail}"
+            fi
+            exit 1
+          }
+          shopt -s nullglob
+          files=(pkg/*)
+          [ ${#files[@]} -gt 0 ] || { echo "::error::pkg/ 下没有制品可上传"; exit 1; }
+          for f in "${files[@]}"; do
+            [ -f "${f}" ] || continue
+            name="$(basename "${f}")"
+            # COS 对象只存 MD5（ETag），sha256 得自带：作为对象自定义元数据写进对象本身，
+            # 可用 `coscli stat`（HEAD）读回（`ls` 不返回自定义元数据）。
+            sha="$(sha256sum "${f}" | cut -d' ' -f1)"
+            [ -n "${sha}" ] || { echo "::error::无法计算 ${name} 的 sha256" >&2; exit 1; }
+            meta="x-cos-meta-artifact-sha256:${sha}"
+            coscli cp "${f}" "cos://${COS_BUCKET}/${prefix}/${TAG}/${name}" -c "${cfg}" --meta "${meta}" \
+              || dump_err "上传 ${name} 失败（${TAG}）"
+            coscli cp "${f}" "cos://${COS_BUCKET}/${prefix}/latest/${name}" -c "${cfg}" --meta "${meta}" \
+              || dump_err "上传 ${name} 失败（latest）"
+            echo "已上传 ${name}  sha256=${sha}"
+          done
+          echo "COS 上传完成。"
+          coscli ls "cos://${COS_BUCKET}/${prefix}/" -c "${cfg}" \
+            || echo "::warning::COS 列表失败（可能缺 cos:GetBucket 权限）；上传本身已成功。"
