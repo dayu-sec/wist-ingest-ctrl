@@ -1,0 +1,30 @@
+[package]
+name = "wist-ingest-ctrl"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Control plane for the wist-ingest data plane (warp-parse TCP+TLS source)"
+
+[dependencies]
+anyhow = "1"
+axum = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "process",
+    "time",
+    "fs",
+] }
+tokio-rustls = "0.26"
+toml = "0.8"
+tower = { version = "0.5", features = ["util"] }
+wist-auth = { path = "../wist-auth", features = ["serde", "axum"] }
+wist-pki = { path = "../wist-pki" }

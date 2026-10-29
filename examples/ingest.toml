@@ -1,0 +1,52 @@
+# wist-ingest-ctrl 站点配置示例
+#
+# 部署位置建议：/etc/wist-ingest/ctrl.toml（属主=部署账号，0640）
+# 私钥不在这里 —— 只放路径。
+
+[ctrl]
+# 管理面只绑回环：web 容器通过 host.docker.internal 访问。
+listen = "127.0.0.1:19091"
+
+# 数据面运行根（容器内 /data 的宿主侧目录）。
+work_root = "/opt/wist-ingest/data-plane-run/work"
+
+# 站点身份目录（注意：compose 把 identity/ingest/trust 挂到 /data/identity/ingest，
+# 所以这里要指到 trust/ 这一层）。
+identity_dir = "/opt/wist-ingest/identity/ingest/trust"
+
+# 要管理的容器名（docker restart / docker exec 用）。
+container = "wist-ingest-stack-ingest"
+
+# 容器内的工作根。
+container_workdir = "/data"
+
+# 管理面 TLS/mTLS（与 gwlinkd↔Center 同构：ctrl 当服务端，web 当客户端）。
+# 配了 client_ca_file 就是双向认证；默认严格（不允许匿名）。
+[ctrl.tls]
+cert_file = "/opt/wist-ingest/identity/ctrl/tls/ctrl.pem"
+key_file = "/opt/wist-ingest/identity/ctrl/tls/ctrl.key"
+client_ca_file = "/opt/wist-ingest/identity/ctrl/tls/web-client-ca.pem"
+# 只在“首次还没有客户端证书”的场景才置 true。
+allow_unauthenticated = false
+
+[ingest]
+bind = "0.0.0.0"
+port = 6514
+# 强制 len 帧；line 会在多行日志上错帧。
+framing = "len"
+
+# 以下路径是**容器内**路径（与 ctrl 无关，只写进 wparse 配置）。
+server_cert = "/data/identity/ingest/server.pem"
+server_key = "/data/identity/ingest/server.key"
+# 必填：不填 client_ca，wparse 的 tcp source 不会要求客户端证书（静默降级为单向 TLS）。
+client_ca = "/data/identity/ingest/client-ca.pem"
+
+# 网关台账（单端口模式下只用于审计/展示；隔离请用 per-listener 模式，后续版本）。
+[[gateways]]
+name = "site-a"
+tenant = "tenant-a"
+
+[[gateways]]
+name = "site-b"
+tenant = "tenant-b"
+enabled = false

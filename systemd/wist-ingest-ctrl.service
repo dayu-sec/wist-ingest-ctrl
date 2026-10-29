@@ -1,0 +1,27 @@
+[Unit]
+Description=wist-ingest-ctrl (control plane for wist-ingest / warp-parse TCP TLS source)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 需要一个能执行 `docker exec` / `docker restart` 的账号（通常加入 docker 组），
+# 但不要用 root：它只需要管理一个容器。
+User=wistingest
+Group=wistingest
+Environment=INGEST_CTRL_CONFIG=/etc/wist-ingest/ctrl.toml
+# token 从文件读，避免出现在 systemd unit 或环境里
+Environment=INGEST_CTRL_TOKEN=
+EnvironmentFile=-/etc/wist-ingest/ctrl.env
+ExecStart=/usr/local/bin/wist-ingest-ctrl serve
+Restart=on-failure
+RestartSec=3
+
+# 只读文件系统加固（可选项，按现场调整）
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
