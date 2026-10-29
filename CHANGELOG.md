@@ -13,6 +13,12 @@
 - systemd 单元改成指向栈根：`INGEST_CTRL_CONFIG=<栈根>/configs/ctrl/ctrl.toml`、
   `INGEST_CTRL_SEC_FILE=<栈根>/.wist/sec-value.yml`，不再放 `/etc`。
 
+### 修复
+
+- Linux 产物改为 **静态 musl**（与 wist-center 一致）。之前用 gnu：在 ubuntu-24.04 上构建的
+  二进制需要 glibc 2.39，而镜像基础 `debian:bookworm-slim` 只有 2.36，容器直接
+  `GLIBC_2.39 not found` 起不来。musl 静态后既能进镜像、也能直接丢到宿主跑。
+
 测试：78 → 85 个（新增密钥展开 / 规范化 / 失败路径）。
 
 ## [0.1.2] - 2026-10-29

@@ -8,9 +8,9 @@ permissions:
   contents: read
 
 # 结构对齐 `wist-center` 的 release.yml（二进制 + 多架构镜像 + 可选 COS）。
-# 与它唯一的差异：这里出 **gnu** 目标而不是 musl —— 容器基础镜像用 debian:bookworm-slim，
-# 宿主侧是 Debian/Ubuntu 的 systemd 单元，没有跨发行版需求。要换 musl 见 wist-center 的
-# `Install musl toolchain` + `CC_*_musl` env 那段，连 Dockerfile 基础镜像一起换。
+# Linux 出 **静态 musl**（与 center 一致）：二进制会被抽到宿主原生运行、也会被 COPY 进
+# debian-slim 镜像 —— gnu 目标会绑死构建机的 glibc（ubuntu-24.04 是 2.39，bookworm 只有 2.36，
+# 镜像里直接 `GLIBC_2.39 not found`）。
 jobs:
   # 1a. Linux 二进制：镜像 job 只依赖这一段，不再等 macOS。
   build-linux:
@@ -23,10 +23,10 @@ jobs:
           # 原生 runner 构建：amd64 在 ubuntu-24.04，arm64 在 ubuntu-24.04-arm。
           - os: ubuntu-24.04
             arch: amd64
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
           - os: ubuntu-24.04-arm
             arch: arm64
-            target: aarch64-unknown-linux-gnu
+            target: aarch64-unknown-linux-musl
     steps:
       - uses: actions/checkout@v7
 
@@ -35,12 +35,23 @@ jobs:
           toolchain: stable
           targets: ${{ matrix.target }}
 
-      # 按 target 分缓存：产物在 target/<triple>/ 下，和宿主 build 不互相污染。
+      # 按 target 分缓存：musl 的产物在 target/<triple>/ 下，和宿主 build 不互相污染。
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
 
+      - name: Install musl toolchain
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
       - name: Cargo build
+        # ring / rustls 等 C 依赖按 target 取 CC；Rust 侧链接器指向 musl-gcc 才能真静态。
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          AR_x86_64_unknown_linux_musl: ar
+          CC_aarch64_unknown_linux_musl: musl-gcc
+          AR_aarch64_unknown_linux_musl: ar
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
         run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Package tarball
@@ -112,13 +123,13 @@ jobs:
 
       - uses: actions/download-artifact@v8
         with:
-          name: wist-ingest-ctrl-x86_64-unknown-linux-gnu
+          name: wist-ingest-ctrl-x86_64-unknown-linux-musl
           path: staged
 
       - name: Stage binary for docker build
         run: |
           mkdir -p dist/amd64
-          tar -xzf "staged/wist-ingest-ctrl-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz" \
+          tar -xzf "staged/wist-ingest-ctrl-${{ github.ref_name }}-x86_64-unknown-linux-musl.tar.gz" \
             -C dist/amd64
           ls -lh dist/amd64
 
@@ -168,13 +179,13 @@ jobs:
 
       - uses: actions/download-artifact@v8
         with:
-          name: wist-ingest-ctrl-aarch64-unknown-linux-gnu
+          name: wist-ingest-ctrl-aarch64-unknown-linux-musl
           path: staged
 
       - name: Stage binary for docker build
         run: |
           mkdir -p dist/arm64
-          tar -xzf "staged/wist-ingest-ctrl-${{ github.ref_name }}-aarch64-unknown-linux-gnu.tar.gz" \
+          tar -xzf "staged/wist-ingest-ctrl-${{ github.ref_name }}-aarch64-unknown-linux-musl.tar.gz" \
             -C dist/arm64
           ls -lh dist/arm64
 
