@@ -83,14 +83,20 @@ jobs:
           # 预发布 tag（-alpha / -beta / -rc）只推该 tag，不覆盖 :latest。
           ghcr="ghcr.io/${{ github.repository }}"
           tcr="dy-sec.tencentcloudcr.com/cloud/wist-ingest-ctrl"
-          tags="$(printf '%s\n%s' "$ghcr:${{ github.ref_name }}" "$tcr:${{ github.ref_name }}")"
-          case "${{ github.ref_name }}" in
+          ref="${{ github.ref_name }}"
+          # 一行一个 tag。不要写成 `printf '%s\n%s' a b c`：参数多于格式里的占位符时，
+          # 第二轮从 `%s` 开始续写，会把最后两行粘成一个（`...:latest...:latest`）。
+          tags_file="${RUNNER_TEMP}/image-tags.txt"
+          printf '%s\n' "$ghcr:$ref" "$tcr:$ref" > "$tags_file"
+          case "$ref" in
             *-*) ;;
-            *)
-              tags="$(printf '%s\n%s' "$tags" "$ghcr:latest" "$tcr:latest")"
-              ;;
+            *) printf '%s\n' "$ghcr:latest" "$tcr:latest" >> "$tags_file" ;;
           esac
-          printf 'tags<<__EOF__\n%s\n__EOF__\n' "$tags" >> "$GITHUB_OUTPUT"
+          {
+            echo "tags<<__EOF__"
+            cat "$tags_file"
+            echo "__EOF__"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build and push
         uses: docker/build-push-action@v6
