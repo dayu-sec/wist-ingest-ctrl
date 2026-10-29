@@ -1,0 +1,125 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+
+jobs:
+  # 1. 按平台原生编译二进制，产出 tarball（直接下载 + 供 Docker 镜像用）
+  build-binaries:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-14
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Cargo build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package tarball
+        run: |
+          mkdir -p artifacts
+          cp "target/${{ matrix.target }}/release/wist-ingest-ctrl" artifacts/wist-ingest-ctrl
+          cp version.txt artifacts/version.txt
+          cp systemd/wist-ingest-ctrl.service artifacts/wist-ingest-ctrl.service
+          tar -czf "wist-ingest-ctrl-${{ github.ref_name }}-${{ matrix.target }}.tar.gz" \
+            -C artifacts wist-ingest-ctrl wist-ingest-ctrl.service version.txt
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wist-ingest-ctrl-${{ matrix.target }}
+          path: wist-ingest-ctrl-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  # 2. 多架构镜像：ghcr.io + 腾讯云 TCR（国内服务器拉 ghcr 很慢）
+  docker:
+    needs: [build-binaries]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to TCR
+        uses: docker/login-action@v3
+        with:
+          registry: dy-sec.tencentcloudcr.com
+          username: ${{ secrets.TCR_USERNAME }}
+          password: ${{ secrets.TCR_PASSWORD }}
+
+      - name: Compute image tags
+        id: meta
+        run: |
+          # 预发布 tag（-alpha / -beta / -rc）只推该 tag，不覆盖 :latest。
+          ghcr="ghcr.io/${{ github.repository }}"
+          tcr="dy-sec.tencentcloudcr.com/cloud/wist-ingest-ctrl"
+          tags="$(printf '%s\n%s' "$ghcr:${{ github.ref_name }}" "$tcr:${{ github.ref_name }}")"
+          case "${{ github.ref_name }}" in
+            *-*) ;;
+            *)
+              tags="$(printf '%s\n%s' "$tags" "$ghcr:latest" "$tcr:latest")"
+              ;;
+          esac
+          printf 'tags<<__EOF__\n%s\n__EOF__\n' "$tags" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          platforms: linux/amd64,linux/arm64
+
+  # 3. 发布 tarball 到 GitHub Release
+  release:
+    needs: [build-binaries]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: wist-ingest-ctrl-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Release
+        uses: softprops/action-gh-release@v3
+        with:
+          name: ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: artifacts/*.tar.gz

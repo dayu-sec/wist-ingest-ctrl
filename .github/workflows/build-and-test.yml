@@ -1,0 +1,41 @@
+name: Build & Test
+
+on:
+  push:
+    branches:
+      - "*"
+  pull_request:
+    types: [opened, reopened]
+    branches:
+      - "*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: Cargo build (release)
+        run: cargo build --release --locked
+
+      - name: Cargo test (release)
+        run: cargo test --release --locked
