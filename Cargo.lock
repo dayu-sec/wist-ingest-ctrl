@@ -1357,6 +1357,7 @@ dependencies = [
 [[package]]
 name = "wist-auth"
 version = "0.1.0"
+source = "git+https://github.com/dayu-sec/wist-auth.git?tag=v0.1.0#fe0ba1f64eeaaf33018589520efb0c11fa4028da"
 dependencies = [
  "axum",
  "http",
@@ -1389,6 +1390,7 @@ dependencies = [
 [[package]]
 name = "wist-pki"
 version = "0.1.0"
+source = "git+https://github.com/dayu-sec/wist-pki.git?tag=v0.1.0#baacaa357b9a72f781172f4d49fe46b32c0dc8da"
 dependencies = [
  "chrono",
  "pem",

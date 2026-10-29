@@ -26,5 +26,9 @@ tokio = { version = "1", features = [
 tokio-rustls = "0.26"
 toml = "0.8"
 tower = { version = "0.5", features = ["util"] }
-wist-auth = { path = "../wist-auth", features = ["serde", "axum"] }
-wist-pki = { path = "../wist-pki" }
+# 共享原语：按 tag 引，保证单独 clone 本仓也能构建。
+# 本地联调可改成 path（与 wist-auth / wist-pki 平铺在同一父目录时）：
+#wist-auth = { path = "../wist-auth", features = ["serde", "axum"] }
+#wist-pki = { path = "../wist-pki" }
+wist-auth = { git = "https://github.com/dayu-sec/wist-auth.git", tag = "v0.1.0", features = ["serde", "axum"] }
+wist-pki = { git = "https://github.com/dayu-sec/wist-pki.git", tag = "v0.1.0" }
