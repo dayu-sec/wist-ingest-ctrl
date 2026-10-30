@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.2.0] - 2026-10-30
+
+### 新增（数据面接入授权，逻辑对齐 wist-center 的控制面 link）
+
+给网关签发**数据面**（gateway → ingest）接入授权，形态与 center 的「连接 Gateway」一致：
+一次性券 + 短 TTL + 落盘只存 sha256 + 明文只随签发响应交付一次。
+
+- `GET /api/v1/links`：按 `[[gateways]]` 台账列出每台的授权状态
+  （`none` / `pending` / `expired` / `linked` / `revoked`，另带 `linked` / `token_pending` 两个正交事实）；
+- `POST /api/v1/gateways/{gateway}/link-token`（admin）：签发/轮换一次性券，返回入口、
+  client CA（PEM）与 `wist-ingest://` 接入串；响应 `Cache-Control: no-store`；
+- `POST /api/v1/link/redeem`（**免 Bearer**）：网关凭券登记客户端证书 SHA-256 指纹；
+  租户以台账为准（自报只做交叉核对），券一次有效、过期拒绝；
+- `DELETE /api/v1/gateways/{gateway}/link`（admin）：撤销授权（清券 + 清指纹绑定）；
+- 台账落 `<work_root>/.ctrl/link-grants.json`（0600，临时文件 + rename），**无明文券**；
+- 轮换只换券：已绑定的指纹与接入时间保留（换证书/换机器时显式撤销）；
+- 新配置 `[ctrl.link]`：`ttl_seconds`（默认 900，允许 60..=86400）、
+  `advertise = "host:port"`（交付给网关的入口，留空则由 `ingest.bind:port` 推导）；
+  新 lint：`E015` TTL 越界、`E016` advertise 不是合法 host:port。
+
+### 新增（wparse 当前应用的配置与规则，只读）
+
+- `GET /api/v1/data-plane/tree`：`conf/` `connectors/` `topology/` `models/` + `wparse.local.toml`
+  的目录树（目录在前、不展开符号链接、最多 4096 条）；
+- `GET /api/v1/data-plane/file?path=…`：读单个文本文件。拒绝绝对路径 / `..` / 反斜杠 / NUL，
+  `canonicalize` 后仍须在工作根且顶层在白名单内（挡符号链接逃逸）；单文件 ≤ 1 MiB，
+  非 UTF-8 只标 `binary` 不返回正文；
+- 只读：本模块没有任何写路径，与 gateway 的 `/api/v1/admin/data-plane/*` 同一套口径。
+
+### 测试
+
+- 85 → 127 个：授权签发/消费/过期/重放/轮换/撤销/损坏台账、指纹规范化、
+  base64url、数据面白名单/穿越/符号链接/截断/二进制，以及两组 HTTP 路由测试。
+
 ## [0.1.3] - 2026-10-29
 
 ### 新增（对齐 center / gateway 的密钥口径）
