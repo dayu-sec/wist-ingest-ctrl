@@ -29,6 +29,16 @@ client_ca_file = "/opt/wist-ingest/identity/ctrl/tls/web-client-ca.pem"
 # 只在“首次还没有客户端证书”的场景才置 true。
 allow_unauthenticated = false
 
+# 数据面接入授权（gateway → ingest）：交付给网关的一次性接入券。
+# 与 center 的 [security] link_ttl_seconds 同一口径：短 TTL、只存 sha256、明文只出一次。
+[ctrl.link]
+# 券有效期（秒），允许 60..=86400，默认 900。
+ttl_seconds = 900
+# 网关实际要连的入口 host:port（host 可以是域名；IPv6 写 [2001:db8::1]:6514）。
+# 留空则由 ingest.bind:port 推导 —— bind = 0.0.0.0 时推导出来的地址对端连不上，
+# 管理台会提示先配这一项。
+# advertise = "ingest.example.com:6514"
+
 [ingest]
 bind = "0.0.0.0"
 port = 6514

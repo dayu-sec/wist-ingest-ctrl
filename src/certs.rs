@@ -174,6 +174,7 @@ mod tests {
                 token_file: None,
                 auth: Default::default(),
                 tls: None,
+                link: Default::default(),
             },
             ingest: Ingest {
                 bind: "0.0.0.0".into(),

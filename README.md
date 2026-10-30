@@ -40,9 +40,36 @@ INGEST_CTRL_TOKEN=... wist-ingest-ctrl --config /etc/wist-ingest/ctrl.toml serve
 | GET | `/api/v1/status` | 配置摘要、lint 结果、上次 apply 状态 |
 | GET | `/api/v1/certs` | 身份文件：存在性、`mode`、证书 SHA-256 指纹、`notAfter`（私钥不返回派生值） |
 | GET | `/api/v1/whoami` | 回显本次连接的 mTLS 身份（`uri` / `cn` / 指纹 / 有效期） |
+| GET | `/api/v1/links` | 每台网关的**数据面接入授权**状态（`none/pending/expired/linked/revoked`） |
+| POST | `/api/v1/gateways/{gateway}/link-token` | 签发/轮换一次性接入券（明文只随本次响应交付，`no-store`） |
+| DELETE | `/api/v1/gateways/{gateway}/link` | 撤销授权（清券 + 清指纹绑定） |
+| POST | `/api/v1/link/redeem` | **免 Bearer** 的消费通道：凭一次性券登记网关客户端证书指纹 |
+| GET | `/api/v1/data-plane/tree` | 数据面当前配置与规则的目录树（白名单：`conf/` `connectors/` `topology/` `models/` + `wparse.local.toml`） |
+| GET | `/api/v1/data-plane/file?path=…` | 读单个文本文件（拒绝 `..`/绝对路径/符号链接逃逸，单文件 ≤ 1 MiB） |
 | POST | `/api/v1/apply?restart=false` | 渲染 + 校验 + 生效（默认 `restart=true`） |
 
-除 `/healthz` 外都要求 `Authorization: Bearer <token>`。
+除 `/healthz` 与 `/api/v1/link/redeem` 外都要求 `Authorization: Bearer <token>`。
+
+### 数据面接入授权（gateway → ingest）
+
+与 center 的控制面 link **同一套逻辑**：一次性券 + 短 TTL（`[ctrl.link] ttl_seconds`，默认 900s）
++ 落盘只存 sha256（`<work_root>/.ctrl/link-grants.json`，0600）+ 明文只在签发响应里出现一次。
+
+```bash
+# 1) 管理员签发（或轮换）：拿到一次性券、入口、client CA（PEM）
+curl -sS -X POST -H "Authorization: Bearer $ADMIN" \
+  https://ingest.example.com/api/v1/gateways/site-a/link-token
+
+# 2) 网关消费：把「入口 + CA」写进 tcp sink，并用自己的客户端证书指纹登记
+curl -sS -X POST https://ingest.example.com/api/v1/link/redeem \
+  -H 'content-type: application/json' \
+  -d '{"gateway":"site-a","link_token":"wil_…","fingerprint_sha256":"…","tenant":"tenant-a"}'
+```
+
+- 数据面的**强制点仍是 mTLS**：`tcp` source 校验 `ingest.client_ca`（`E001` 保证它非空），
+  授权台账负责「这台网关的哪张证书被允许接入、属于哪个租户」的可审计事实；
+- 轮换券**不会**清掉已绑定的指纹（换证书/换机器时显式用 `DELETE …/link` 撤销）；
+- 自报 `tenant` 只做交叉核对，**不能**改台账里的租户（台账是授权来源）。
 
 ### 管理面 TLS/mTLS
 
@@ -67,7 +94,7 @@ Bearer token、落盘存 **sha256 hex**、常数时间比较、错 token 计入�
 | 作用域 | 配置 | 能做什么 |
 |---|---|---|
 | `admin` | `ctrl.auth.admin_token`（或 `admin_token_hash` / 环境变量 `INGEST_CTRL_ADMIN_TOKEN` / `INGEST_CTRL_TOKEN`） | 读 + `apply`（重启数据面） |
-| `viewer` | `ctrl.auth.viewer_token` / `viewer_token_hash` / `INGEST_CTRL_VIEWER_TOKEN` | 只读 |
+| `viewer` | `ctrl.auth.viewer_token` / `viewer_token_hash` / `INGEST_CTRL_VIEWER_TOKEN` | 只读（状态 / 证件 / 授权台账 / 数据面配置与规则） |
 
 - **配置里写占位符，真值放密钥文件**（与 wist-center / wist-gateway 同口径）：
   `admin_token = "${SEC_INGEST_CTRL_ADMIN_TOKEN}"`，ctrl 启动时从

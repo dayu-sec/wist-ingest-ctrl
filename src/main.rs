@@ -2,6 +2,8 @@ mod api;
 mod apply;
 mod certs;
 mod config;
+mod data_plane;
+mod link;
 mod render;
 
 use std::path::PathBuf;

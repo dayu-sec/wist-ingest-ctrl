@@ -40,9 +40,45 @@ pub struct Ctrl {
     /// 管理面 TLS。不配则明文（仅允许回环监听）。
     #[serde(default)]
     pub tls: Option<CtrlTls>,
+    /// 数据面接入授权（gateway → ingest）。与 center 的 `[security] link_ttl_seconds` 同口径。
+    #[serde(default)]
+    pub link: LinkConfig,
 }
 
 pub use wist_auth::AuthConfig as CtrlAuth;
+
+/// 数据面接入授权（网关 → ingest）的交付参数。
+///
+/// **只描述“券长什么样、交给谁”**，不存任何凭据：一次性券的明文只在签发响应里出现一次，
+/// 落盘只有 sha256（见 `link.rs`）。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LinkConfig {
+    /// 接入券有效期（秒）。默认 15 分钟，与 center 的 `link_ttl_seconds` 一致。
+    /// 下限 60 秒、上限 24 小时：太短来不及粘贴，太长等于长期凭据。
+    #[serde(default = "default_link_ttl")]
+    pub ttl_seconds: i64,
+    /// 交付给网关的**数据面入口** `host:port`（host 可以是域名）。
+    /// 留空则由 `ingest.bind:port` 推导；`bind = 0.0.0.0` 时推导出来的地址没法直接用，
+    /// 管理台会提示先配这一项。
+    #[serde(default)]
+    pub advertise: Option<String>,
+}
+
+impl Default for LinkConfig {
+    fn default() -> Self {
+        Self {
+            ttl_seconds: default_link_ttl(),
+            advertise: None,
+        }
+    }
+}
+
+/// 数据面接入入口（host 可以是域名；IPv6 用 `[::1]` 形式）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Endpoint {
+    pub host: String,
+    pub port: u16,
+}
 
 /// 管理面 TLS/mTLS。与 gwlinkd↔Center 同构：ctrl 当服务端，web 当客户端。
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -98,6 +134,51 @@ fn default_framing() -> String {
 }
 fn default_enabled() -> bool {
     true
+}
+fn default_link_ttl() -> i64 {
+    900
+}
+
+/// 解析 `host:port`（host 可为域名；IPv6 用 `[::1]:6514`）。
+///
+/// 不用 `SocketAddr`：交付给网关的入口经常写域名（`ingest.example.com:6514`），
+/// `SocketAddr` 只接受 IP 字面量。端口 0 / 空 host 一律拒绝。
+pub(crate) fn parse_endpoint(text: &str) -> Option<Endpoint> {
+    let text = text.trim();
+    if text.is_empty() || text.contains(char::is_whitespace) {
+        return None;
+    }
+    let (host, port) = if let Some(rest) = text.strip_prefix('[') {
+        let (host, tail) = rest.split_once(']')?;
+        (host, tail.strip_prefix(':')?)
+    } else {
+        text.rsplit_once(':')?
+    };
+    let host = host.trim();
+    if host.is_empty() {
+        return None;
+    }
+    let port: u16 = port.parse().ok().filter(|port| *port != 0)?;
+    Some(Endpoint {
+        host: host.to_string(),
+        port,
+    })
+}
+
+impl Endpoint {
+    /// 通配/未配置的地址：对端连不上，管理台要提示配 `[ctrl.link] advertise`。
+    pub fn is_wildcard(&self) -> bool {
+        matches!(self.host.as_str(), "0.0.0.0" | "::" | "*")
+    }
+
+    /// `host:port`（IPv6 自动加方括号），用于接入链接里的 authority。
+    pub fn authority(&self) -> String {
+        if self.host.contains(':') {
+            format!("[{}]:{}", self.host, self.port)
+        } else {
+            format!("{}:{}", self.host, self.port)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,6 +306,34 @@ impl Config {
 
     pub fn enabled_gateways(&self) -> impl Iterator<Item = &Gateway> {
         self.gateways.iter().filter(|g| g.enabled)
+    }
+
+    /// 按名字取台账里的网关（含停用的：签发时要能报“已停用”而不是“不存在”）。
+    pub fn gateway(&self, name: &str) -> Option<&Gateway> {
+        self.gateways.iter().find(|g| g.name == name)
+    }
+
+    /// 交付给网关的数据面入口：`[ctrl.link] advertise` 优先，其次由 `ingest.bind:port` 推导。
+    pub fn data_endpoint(&self) -> Endpoint {
+        self.ctrl
+            .link
+            .advertise
+            .as_deref()
+            .and_then(parse_endpoint)
+            .unwrap_or_else(|| Endpoint {
+                host: self.ingest.bind.trim().to_string(),
+                port: self.ingest.port,
+            })
+    }
+
+    /// 入口是否来自配置（`false` = 由 listen 推导，`0.0.0.0` 之类没法直接给对端用）。
+    pub fn data_endpoint_configured(&self) -> bool {
+        self.ctrl
+            .link
+            .advertise
+            .as_deref()
+            .and_then(parse_endpoint)
+            .is_some()
     }
 
     /// 安全相关的静态检查。Error 会阻止 apply。
@@ -384,6 +493,30 @@ impl Config {
                         .to_string(),
                 });
             }
+        }
+
+        // --- 数据面接入授权 ---
+        // 券太长等于长期凭据；太短来不及粘贴。与 center 的 link_ttl_seconds 同一口径。
+        if !(60..=86_400).contains(&self.ctrl.link.ttl_seconds) {
+            out.push(Finding {
+                level: Level::Error,
+                code: "E015",
+                message: format!(
+                    "ctrl.link.ttl_seconds = {} 超出允许范围（60..=86400 秒）",
+                    self.ctrl.link.ttl_seconds
+                ),
+            });
+        }
+        if let Some(advertise) = &self.ctrl.link.advertise
+            && parse_endpoint(advertise).is_none()
+        {
+            out.push(Finding {
+                level: Level::Error,
+                code: "E016",
+                message: format!(
+                    "ctrl.link.advertise = {advertise:?} 不是合法的 host:port（IPv6 用 [::1]:6514）"
+                ),
+            });
         }
 
         // --- gateways（台账）---
@@ -901,5 +1034,110 @@ client_ca = "/data/identity/ingest/client-ca.pem"
         let err = toml::from_str::<Config>(&format!("{BASE}\n[ctrl.auth]\nadmin_tokn = \"x\"\n"))
             .unwrap_err();
         assert!(err.to_string().contains("unknown field"), "{err}");
+    }
+
+    // ---- 数据面接入授权（[ctrl.link]）----
+
+    #[test]
+    fn link_defaults_match_center_ttl() {
+        let cfg = parse("");
+        assert_eq!(cfg.ctrl.link.ttl_seconds, 900);
+        assert_eq!(cfg.ctrl.link.advertise, None);
+        assert_eq!(
+            cfg.data_endpoint(),
+            Endpoint {
+                host: "0.0.0.0".into(),
+                port: 6514
+            }
+        );
+        assert!(!cfg.data_endpoint_configured());
+        assert!(cfg.data_endpoint().is_wildcard());
+    }
+
+    #[test]
+    fn advertise_wins_over_bind() {
+        let cfg = parse("[ctrl.link]\nadvertise = \"ingest.example.com:7514\"\n");
+        assert!(errors(&cfg).is_empty(), "{:?}", cfg.lint());
+        assert_eq!(
+            cfg.data_endpoint(),
+            Endpoint {
+                host: "ingest.example.com".into(),
+                port: 7514
+            }
+        );
+        assert!(cfg.data_endpoint_configured());
+        assert!(!cfg.data_endpoint().is_wildcard());
+    }
+
+    #[test]
+    fn endpoint_parsing_handles_hostnames_and_ipv6() {
+        assert_eq!(
+            parse_endpoint(" ingest.example.com:6514 "),
+            Some(Endpoint {
+                host: "ingest.example.com".into(),
+                port: 6514
+            })
+        );
+        assert_eq!(
+            parse_endpoint("[2001:db8::1]:6514"),
+            Some(Endpoint {
+                host: "2001:db8::1".into(),
+                port: 6514
+            })
+        );
+        // 缺端口 / 端口 0 / 空 host / 空白字符一律拒绝。
+        for bad in [
+            "ingest.example.com",
+            "host:0",
+            ":6514",
+            "",
+            "[::1]",
+            "a b:1",
+        ] {
+            assert_eq!(parse_endpoint(bad), None, "{bad:?} 应被拒绝");
+        }
+    }
+
+    #[test]
+    fn ipv6_authority_is_bracketed() {
+        let ep = Endpoint {
+            host: "2001:db8::1".into(),
+            port: 6514,
+        };
+        assert_eq!(ep.authority(), "[2001:db8::1]:6514");
+    }
+
+    #[test]
+    fn link_ttl_out_of_range_is_rejected() {
+        for (ttl, ok) in [
+            (59, false),
+            (60, true),
+            (86_400, true),
+            (86_401, false),
+            (0, false),
+        ] {
+            let cfg = parse(&format!("[ctrl.link]\nttl_seconds = {ttl}\n"));
+            assert_eq!(
+                errors(&cfg).contains(&"E015"),
+                !ok,
+                "ttl={ttl} 的判定不对：{:?}",
+                cfg.lint()
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_advertise_is_rejected() {
+        let cfg = parse("[ctrl.link]\nadvertise = \"ingest.example.com\"\n");
+        assert_eq!(errors(&cfg), vec!["E016"]);
+    }
+
+    #[test]
+    fn gateway_lookup_includes_disabled_entries() {
+        let cfg =
+            parse("[[gateways]]\nname = \"a\"\n\n[[gateways]]\nname = \"b\"\nenabled = false\n");
+        assert!(cfg.gateway("a").is_some());
+        assert!(cfg.gateway("b").is_some_and(|gw| !gw.enabled));
+        assert!(cfg.gateway("c").is_none());
     }
 }

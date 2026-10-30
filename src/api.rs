@@ -2,19 +2,21 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use axum::extract::{ConnectInfo, Extension, Query, Request, State};
+use axum::extract::{ConnectInfo, Extension, Path, Query, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::Next;
-use axum::response::Response;
-use axum::routing::{get, post};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio_rustls::TlsAcceptor;
 
 use crate::apply;
 use crate::certs;
 use crate::config::Config;
+use crate::data_plane::{self, DataPlaneRoot, ReadError};
+use crate::link;
 use wist_auth::{AuthPolicy, Scope};
 
 pub struct AppState {
@@ -58,6 +60,9 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/status", get(status))
         .route("/api/v1/certs", get(list_certs))
         .route("/api/v1/whoami", get(whoami))
+        .route("/api/v1/links", get(list_links))
+        .route("/api/v1/data-plane/tree", get(data_plane_tree))
+        .route("/api/v1/data-plane/file", get(data_plane_file))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             require_viewer,
@@ -66,6 +71,8 @@ fn router(state: Arc<AppState>) -> Router {
     // 变更：仅 admin
     let admin = Router::new()
         .route("/api/v1/apply", post(apply_handler))
+        .route("/api/v1/gateways/{gateway}/link-token", post(issue_link))
+        .route("/api/v1/gateways/{gateway}/link", delete(revoke_link))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             require_admin,
@@ -73,6 +80,9 @@ fn router(state: Arc<AppState>) -> Router {
 
     Router::new()
         .route("/healthz", get(healthz))
+        // 数据面接入的消费通道：只认一次性接入券，**不**认管理面 Bearer。
+        // 与 center 的 `link-upstream` 同一形态（接入通道不能要求先有管理面凭据）。
+        .route("/api/v1/link/redeem", post(redeem_link))
         .merge(viewer)
         .merge(admin)
         .with_state(state)
@@ -279,6 +289,194 @@ async fn list_certs(State(state): State<Arc<AppState>>) -> (StatusCode, Json<ser
     }
 }
 
+// ── 数据面接入授权（gateway → ingest）────────────────────────────────────────
+
+fn json_error(status: StatusCode, code: &str, message: impl Into<String>) -> Response {
+    (
+        status,
+        Json(json!({ "error": { "code": code, "message": message.into() } })),
+    )
+        .into_response()
+}
+
+/// 带一次性明文的响应一律 `no-store`（与 center 的 link-token 同一口径）。
+fn no_store(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
+#[allow(clippy::result_large_err)]
+fn load_config(state: &AppState) -> Result<Config, Response> {
+    Config::load(&state.cfg_path).map_err(|e| {
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "config_load_failed",
+            e.to_string(),
+        )
+    })
+}
+
+#[allow(clippy::result_large_err)]
+fn load_grants(cfg: &Config) -> Result<link::Grants, Response> {
+    link::load(&cfg.ctrl.work_root).map_err(|err| {
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "link_store_failed",
+            format!("读取授权台账失败：{err:#}"),
+        )
+    })
+}
+
+fn link_error(err: link::LinkError) -> Response {
+    let status = StatusCode::from_u16(err.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    json_error(status, err.code, err.message)
+}
+
+/// `GET /api/v1/links`：按配置台账列出每台网关的数据面接入状态（不含券 hash）。
+async fn list_links(State(state): State<Arc<AppState>>) -> Response {
+    let cfg = match load_config(&state) {
+        Ok(cfg) => cfg,
+        Err(response) => return response,
+    };
+    let grants = match load_grants(&cfg) {
+        Ok(grants) => grants,
+        Err(response) => return response,
+    };
+    Json(json!({
+        "ttl_seconds": cfg.ctrl.link.ttl_seconds,
+        "endpoint": link::EndpointView::of(&cfg),
+        "grants": link::views(&cfg, &grants),
+    }))
+    .into_response()
+}
+
+/// `POST /api/v1/gateways/{gateway}/link-token`：签发/轮换一次性接入券。
+async fn issue_link(State(state): State<Arc<AppState>>, Path(gateway): Path<String>) -> Response {
+    let cfg = match load_config(&state) {
+        Ok(cfg) => cfg,
+        Err(response) => return response,
+    };
+    match link::issue(&cfg, gateway.trim()) {
+        Ok(issued) => no_store(Json(json!(issued)).into_response()),
+        Err(err) => link_error(err),
+    }
+}
+
+/// `POST /api/v1/link/redeem`：**公开**消费通道，凭一次性券登记网关的客户端证书指纹。
+async fn redeem_link(State(state): State<Arc<AppState>>, Json(payload): Json<Value>) -> Response {
+    let request: link::RedeemRequest = match serde_json::from_value(payload) {
+        Ok(request) => request,
+        Err(err) => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "link_request_invalid",
+                format!("请求体不合法：{err}"),
+            );
+        }
+    };
+    let cfg = match load_config(&state) {
+        Ok(cfg) => cfg,
+        Err(response) => return response,
+    };
+    match link::redeem(&cfg, request) {
+        Ok(redeemed) => no_store(Json(json!(redeemed)).into_response()),
+        Err(err) => link_error(err),
+    }
+}
+
+/// `DELETE /api/v1/gateways/{gateway}/link`：撤销授权（清券 + 清指纹绑定）。
+async fn revoke_link(State(state): State<Arc<AppState>>, Path(gateway): Path<String>) -> Response {
+    let cfg = match load_config(&state) {
+        Ok(cfg) => cfg,
+        Err(response) => return response,
+    };
+    match link::revoke(&cfg, gateway.trim()) {
+        Ok(view) => Json(json!(view)).into_response(),
+        Err(err) => link_error(err),
+    }
+}
+
+// ── 数据面配置与规则（只读）─────────────────────────────────────────────────
+
+#[allow(clippy::result_large_err)]
+fn open_data_plane(cfg: &Config) -> Result<DataPlaneRoot, Response> {
+    DataPlaneRoot::open(&cfg.ctrl.work_root).map_err(|err| {
+        json_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "data_plane_unavailable",
+            format!(
+                "数据面工作根 {} 不可读：{err}（检查 compose 的 /work 挂载）",
+                cfg.ctrl.work_root.display()
+            ),
+        )
+    })
+}
+
+/// `GET /api/v1/data-plane/tree`：白名单根下的目录树。
+async fn data_plane_tree(State(state): State<Arc<AppState>>) -> Response {
+    let cfg = match load_config(&state) {
+        Ok(cfg) => cfg,
+        Err(response) => return response,
+    };
+    let root = match open_data_plane(&cfg) {
+        Ok(root) => root,
+        Err(response) => return response,
+    };
+    let (entries, truncated) = root.list();
+    Json(data_plane::TreeView {
+        work_dir: root.display().to_string(),
+        entries,
+        truncated,
+    })
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct DataPlaneFileQuery {
+    path: String,
+}
+
+/// `GET /api/v1/data-plane/file?path=conf/wparse.toml`：读单个文本文件。
+async fn data_plane_file(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<DataPlaneFileQuery>,
+) -> Response {
+    let cfg = match load_config(&state) {
+        Ok(cfg) => cfg,
+        Err(response) => return response,
+    };
+    let root = match open_data_plane(&cfg) {
+        Ok(root) => root,
+        Err(response) => return response,
+    };
+    match root.read(&query.path) {
+        Ok(view) => Json(json!(view)).into_response(),
+        Err(ReadError::InvalidPath(detail)) => json_error(
+            StatusCode::BAD_REQUEST,
+            "data_plane_path_invalid",
+            format!("非法路径：{detail}"),
+        ),
+        Err(ReadError::NotFound) => json_error(
+            StatusCode::NOT_FOUND,
+            "data_plane_file_not_found",
+            format!("数据面里没有这个文件：{}", query.path),
+        ),
+        Err(ReadError::NotAFile) => json_error(
+            StatusCode::BAD_REQUEST,
+            "data_plane_path_invalid",
+            format!("不是普通文件：{}", query.path),
+        ),
+        Err(ReadError::Io(err)) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "data_plane_read_failed",
+            format!("读取 {} 失败：{err}", query.path),
+        ),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct ApplyParams {
     #[serde(default = "default_restart")]
@@ -395,7 +593,11 @@ tenant = "t1"
 
     fn app(tag: &str) -> (TempDir, Router) {
         let tmp = TempDir::new(tag);
-        let app = app_with(&tmp.0, GOOD_CONFIG);
+        // 数据面接入授权会往 work_root/.ctrl 写台账：用临时目录，别去写 `/w`。
+        let work = tmp.0.join("work");
+        std::fs::create_dir_all(&work).expect("mkdir work");
+        let body = GOOD_CONFIG.replace("work_root = \"/w\"", &format!("work_root = {:?}", work));
+        let app = app_with(&tmp.0, &body);
         (tmp, app)
     }
 
@@ -419,6 +621,39 @@ tenant = "t1"
         }
 
         let response = tower::ServiceExt::oneshot(app, req).await.expect("oneshot");
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("body");
+        let json = if bytes.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+        };
+        (status, json)
+    }
+
+    /// 带 JSON 请求体的版本（公开 redeem 端点用）。
+    async fn send_json(
+        app: Router,
+        method: &str,
+        uri: &str,
+        token: Option<&str>,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(token) = token {
+            builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        let response = tower::ServiceExt::oneshot(
+            app,
+            builder.body(Body::from(body.to_string())).expect("request"),
+        )
+        .await
+        .expect("oneshot");
         let status = response.status();
         let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
             .await
@@ -639,5 +874,317 @@ tenant = "t1"
             classify_apply_error(&wrapped),
             (StatusCode::CONFLICT, "apply_failed")
         );
+    }
+
+    // ── 数据面接入授权（gateway → ingest）────────────────────────────────────
+
+    #[tokio::test]
+    async fn links_are_viewer_readable() {
+        let (_tmp, app) = app("links");
+        let (status, body) = send(app, "GET", "/api/v1/links", Some("viewer-secret"), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["ttl_seconds"], 900);
+        assert_eq!(body["grants"][0]["gateway"], "site-a");
+        assert_eq!(body["grants"][0]["state"], "none");
+        assert_eq!(body["grants"][0]["token_pending"], false);
+        // 台账视图不暴露任何券材料。
+        assert!(body["grants"][0].get("token_sha256").is_none());
+    }
+
+    #[tokio::test]
+    async fn links_require_a_token() {
+        let (_tmp, app) = app("links-401");
+        let (status, body) = send(app, "GET", "/api/v1/links", None, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"]["code"], "missing_bearer_token");
+    }
+
+    #[tokio::test]
+    async fn only_admin_can_issue_and_revoke() {
+        let (_tmp, app) = app("link-admin");
+        let (status, body) = send(
+            app.clone(),
+            "POST",
+            "/api/v1/gateways/site-a/link-token",
+            Some("viewer-secret"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "insufficient_scope");
+
+        let (status, body) = send(
+            app.clone(),
+            "DELETE",
+            "/api/v1/gateways/site-a/link",
+            Some("viewer-secret"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "insufficient_scope");
+    }
+
+    #[tokio::test]
+    async fn issue_returns_a_one_time_token_and_pending_state() {
+        let (_tmp, app) = app("issue");
+        let (status, body) = send(
+            app.clone(),
+            "POST",
+            "/api/v1/gateways/site-a/link-token",
+            Some("admin-secret"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let token = body["link_token"].as_str().expect("token");
+        assert!(token.starts_with("wil_"));
+        assert_eq!(body["gateway"], "site-a");
+        assert_eq!(body["tenant"], "t1");
+        assert_eq!(body["endpoint"]["port"], 6514);
+        assert_eq!(body["endpoint"]["tls"], "mtls");
+        assert!(body["link"].as_str().unwrap().contains(token));
+
+        let (_, links) = send(app, "GET", "/api/v1/links", Some("admin-secret"), None).await;
+        assert_eq!(links["grants"][0]["state"], "pending");
+        assert_eq!(links["grants"][0]["token_pending"], true);
+    }
+
+    #[tokio::test]
+    async fn unknown_gateway_cannot_be_issued() {
+        let (_tmp, app) = app("issue-404");
+        let (status, body) = send(
+            app,
+            "POST",
+            "/api/v1/gateways/ghost/link-token",
+            Some("admin-secret"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "gateway_not_found");
+    }
+
+    #[tokio::test]
+    async fn redeem_is_public_and_binds_the_fingerprint() {
+        let (_tmp, app) = app("redeem");
+        let (_, issued) = send(
+            app.clone(),
+            "POST",
+            "/api/v1/gateways/site-a/link-token",
+            Some("admin-secret"),
+            None,
+        )
+        .await;
+        let token = issued["link_token"].as_str().expect("token");
+
+        // 不带头（公开通道）：只凭一次性券。
+        let body = json!({
+            "gateway": "site-a",
+            "link_token": token,
+            "fingerprint_sha256": "AB".repeat(32),
+            "tenant": "t1",
+            "requested_by": "gwlinkd",
+        });
+        let (status, redeemed) =
+            send_json(app.clone(), "POST", "/api/v1/link/redeem", None, body).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(redeemed["gateway"], "site-a");
+        assert_eq!(redeemed["fingerprint_sha256"], "ab".repeat(32));
+        assert_eq!(
+            redeemed["tags"],
+            json!(["type:tcp", "role:ingest", "gateway:site-a", "tenant:t1"])
+        );
+
+        let (_, links) = send(app, "GET", "/api/v1/links", Some("admin-secret"), None).await;
+        assert_eq!(links["grants"][0]["state"], "linked");
+        assert_eq!(links["grants"][0]["fingerprint_sha256"], "ab".repeat(32));
+    }
+
+    #[tokio::test]
+    async fn redeem_rejects_replay_and_bad_fingerprint() {
+        let (_tmp, app) = app("redeem-bad");
+        let (_, issued) = send(
+            app.clone(),
+            "POST",
+            "/api/v1/gateways/site-a/link-token",
+            Some("admin-secret"),
+            None,
+        )
+        .await;
+        let token = issued["link_token"].as_str().expect("token");
+
+        let bad = json!({
+            "gateway": "site-a",
+            "link_token": token,
+            "fingerprint_sha256": "not-a-fingerprint",
+        });
+        let (status, body) = send_json(app.clone(), "POST", "/api/v1/link/redeem", None, bad).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "link_fingerprint_invalid");
+
+        let good = json!({
+            "gateway": "site-a",
+            "link_token": token,
+            "fingerprint_sha256": "cd".repeat(32),
+        });
+        let (status, _) = send_json(
+            app.clone(),
+            "POST",
+            "/api/v1/link/redeem",
+            None,
+            good.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, body) = send_json(app, "POST", "/api/v1/link/redeem", None, good).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"]["code"], "link_token_invalid");
+    }
+
+    #[tokio::test]
+    async fn revoke_clears_the_binding() {
+        let (_tmp, app) = app("revoke");
+        let (_, issued) = send(
+            app.clone(),
+            "POST",
+            "/api/v1/gateways/site-a/link-token",
+            Some("admin-secret"),
+            None,
+        )
+        .await;
+        let token = issued["link_token"].as_str().expect("token");
+        let body = json!({
+            "gateway": "site-a",
+            "link_token": token,
+            "fingerprint_sha256": "ef".repeat(32),
+        });
+        send_json(app.clone(), "POST", "/api/v1/link/redeem", None, body).await;
+
+        let (status, view) = send(
+            app.clone(),
+            "DELETE",
+            "/api/v1/gateways/site-a/link",
+            Some("admin-secret"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(view["state"], "revoked");
+        assert!(view["fingerprint_sha256"].is_null());
+
+        let (_, links) = send(app, "GET", "/api/v1/links", Some("viewer-secret"), None).await;
+        assert_eq!(links["grants"][0]["state"], "revoked");
+    }
+
+    // ── 数据面配置与规则 ────────────────────────────────────────────────────
+
+    fn app_with_work_root(tmp: &TempDir) -> (PathBuf, Router) {
+        let work = tmp.0.join("work");
+        std::fs::create_dir_all(work.join("conf")).expect("mkdir");
+        std::fs::write(work.join("conf/wparse.toml"), "version = \"1.0\"\n").expect("write");
+        std::fs::create_dir_all(work.join("models/wpl")).expect("mkdir");
+        std::fs::write(work.join("models/wpl/raw.wpl"), "rule raw {}\n").expect("write");
+
+        let body = GOOD_CONFIG
+            .replace("work_root = \"/w\"", &format!("work_root = {:?}", work))
+            .replace(
+                "identity_dir = \"/i\"",
+                &format!("identity_dir = {:?}", tmp.0.join("identity")),
+            );
+        (work, app_with(&tmp.0, &body))
+    }
+
+    #[tokio::test]
+    async fn data_plane_tree_lists_config_and_rules() {
+        let tmp = TempDir::new("dp-tree");
+        let (_work, app) = app_with_work_root(&tmp);
+        let (status, body) = send(
+            app,
+            "GET",
+            "/api/v1/data-plane/tree",
+            Some("viewer-secret"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["truncated"], false);
+        let paths: Vec<_> = body["entries"]
+            .as_array()
+            .expect("entries")
+            .iter()
+            .map(|entry| entry["path"].as_str().unwrap_or_default())
+            .collect();
+        assert!(paths.contains(&"conf/wparse.toml"), "{paths:?}");
+        assert!(paths.contains(&"models/wpl/raw.wpl"), "{paths:?}");
+    }
+
+    #[tokio::test]
+    async fn data_plane_file_reads_text_and_rejects_traversal() {
+        let tmp = TempDir::new("dp-file");
+        let (_work, app) = app_with_work_root(&tmp);
+        let (status, body) = send(
+            app.clone(),
+            "GET",
+            "/api/v1/data-plane/file?path=conf/wparse.toml",
+            Some("viewer-secret"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["content"], "version = \"1.0\"\n");
+        assert_eq!(body["binary"], false);
+
+        let (status, body) = send(
+            app.clone(),
+            "GET",
+            "/api/v1/data-plane/file?path=../etc/passwd",
+            Some("viewer-secret"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "data_plane_path_invalid");
+
+        let (status, body) = send(
+            app.clone(),
+            "GET",
+            "/api/v1/data-plane/file?path=conf/nope.toml",
+            Some("viewer-secret"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "data_plane_file_not_found");
+
+        let (status, _) = send(
+            app,
+            "GET",
+            "/api/v1/data-plane/file?path=conf/wparse.toml",
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn missing_work_root_is_unavailable_not_a_500() {
+        let tmp = TempDir::new("dp-missing");
+        let body = GOOD_CONFIG.replace(
+            "work_root = \"/w\"",
+            &format!("work_root = {:?}", tmp.0.join("work")),
+        );
+        let app = app_with(&tmp.0, &body);
+        let (status, body) = send(
+            app,
+            "GET",
+            "/api/v1/data-plane/tree",
+            Some("viewer-secret"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "data_plane_unavailable");
     }
 }
