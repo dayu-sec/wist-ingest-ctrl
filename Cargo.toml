@@ -35,5 +35,10 @@ orion-variate = "0.14"
 # 本地联调可改成 path（与两者平铺在同一父目录时）：
 #wist-auth = { path = "../wist-auth", features = ["serde", "axum"] }
 #wist-pki = { path = "../wist-pki" }
-wist-auth = { version = "0.1.1", features = ["serde", "axum"] }
+# 本地联调：验证侧凭据登记表来自 wist-auth 的 `credential` feature（未发布 0.2.0 前先走 path）。
+# 发布后改回：wist-auth = { version = "0.2.0", features = ["serde", "axum", "credential"] }
+wist-auth = { path = "../wist-auth", features = ["serde", "axum", "credential"] }
 wist-pki = "0.1.2"
+
+[dev-dependencies]
+http-body-util = "0.1"

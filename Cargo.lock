@@ -2039,8 +2039,6 @@ dependencies = [
 [[package]]
 name = "wist-auth"
 version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2115b61b4c87f042e6af7780362e9e8ebc9900214d4ebf0b775c0c06f4fc754c"
 dependencies = [
  "axum",
  "http",
@@ -2056,6 +2054,7 @@ dependencies = [
  "anyhow",
  "axum",
  "chrono",
+ "http-body-util",
  "hyper",
  "hyper-util",
  "orion-sec",

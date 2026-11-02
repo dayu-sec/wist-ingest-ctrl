@@ -185,6 +185,7 @@ mod tests {
     fn cfg() -> Config {
         Config {
             ctrl: Ctrl {
+                credentials: Default::default(),
                 listen: "127.0.0.1:1".into(),
                 work_root: PathBuf::from("/w"),
                 identity_dir: PathBuf::from("/i"),

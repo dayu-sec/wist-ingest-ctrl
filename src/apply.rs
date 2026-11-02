@@ -396,6 +396,7 @@ mod tests {
         }
         Config {
             ctrl: Ctrl {
+                credentials: Default::default(),
                 listen: "127.0.0.1:1".into(),
                 work_root: work_root.to_path_buf(),
                 identity_dir: identity,

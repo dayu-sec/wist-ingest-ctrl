@@ -22,6 +22,8 @@ use wist_auth::{AuthPolicy, Scope};
 pub struct AppState {
     pub cfg_path: PathBuf,
     pub auth: AuthPolicy,
+    /// 凭据推送接收（`None` = 本服务不接推送）。
+    pub credentials: Option<Arc<crate::credentials::CredentialPush>>,
 }
 
 /// 连接对端地址（TLS 路径由 accept 循环写入；明文路径用 `ConnectInfo`）。
@@ -54,7 +56,7 @@ pub async fn serve(
     }
 }
 
-fn router(state: Arc<AppState>) -> Router {
+pub(crate) fn router(state: Arc<AppState>) -> Router {
     // 只读：viewer / admin 都可访问
     let viewer = Router::new()
         .route("/api/v1/status", get(status))
@@ -78,6 +80,22 @@ fn router(state: Arc<AppState>) -> Router {
             require_admin,
         ));
 
+    // 凭据登记：**不**认管理面 Bearer，改认推送方服务 token（P2 过渡）或以后的 CA-I mTLS。
+    // 未开启（`credentials = None`）时整组路由不挂，访问即 404。
+    let internal = Router::new()
+        .route(
+            "/api/v1/internal/credentials",
+            post(crate::credentials::register_credential),
+        )
+        .route(
+            "/api/v1/internal/credentials/{id}/revoke",
+            post(crate::credentials::revoke_credential),
+        )
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::credentials::require_push_token,
+        ));
+
     Router::new()
         .route("/healthz", get(healthz))
         // 数据面接入的消费通道：只认一次性接入券，**不**认管理面 Bearer。
@@ -85,6 +103,7 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/link/redeem", post(redeem_link))
         .merge(viewer)
         .merge(admin)
+        .merge(internal)
         .with_state(state)
 }
 
@@ -588,6 +607,7 @@ tenant = "t1"
         router(Arc::new(AppState {
             cfg_path: path,
             auth: policy(),
+            credentials: None,
         }))
     }
 

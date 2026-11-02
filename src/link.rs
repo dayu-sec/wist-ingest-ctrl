@@ -687,6 +687,7 @@ mod tests {
     fn cfg(dir: &Path) -> Config {
         Config {
             ctrl: Ctrl {
+                credentials: Default::default(),
                 listen: "127.0.0.1:1".into(),
                 work_root: dir.to_path_buf(),
                 identity_dir: dir.join("identity/ingest"),

@@ -2,6 +2,7 @@ mod api;
 mod apply;
 mod certs;
 mod config;
+mod credentials;
 mod data_plane;
 mod link;
 mod render;
@@ -133,11 +134,59 @@ async fn serve(cfg_path: PathBuf) -> Result<()> {
         eprintln!("[!] 管理面未启用 TLS：Bearer token 出了本机会明文传输");
     }
 
+    let credentials = build_credential_push(&cfg)?;
+    if credentials.is_some() {
+        eprintln!("[i] 凭据推送接收已开启（P2：静态服务 token；P3 换 CA-I mTLS）");
+    }
+
     let state = Arc::new(api::AppState {
         cfg_path: cfg_path.clone(),
         auth,
+        credentials,
     });
     api::serve(addr, state, tls).await
+}
+
+/// 凭据登记表（X 侧）：未开启 → `None`（整组路由不挂）。
+fn build_credential_push(cfg: &Config) -> Result<Option<Arc<credentials::CredentialPush>>> {
+    let cred = &cfg.ctrl.credentials;
+    if !cred.enabled {
+        return Ok(None);
+    }
+
+    let push_token_hash = cred
+        .push_token_hash
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!("[ctrl.credentials] push_token_hash is required when enabled = true")
+        })?;
+
+    let store_path = cred
+        .store_path
+        .clone()
+        .unwrap_or_else(|| cfg.ctrl.work_root.join("credentials.json"));
+
+    let params = wist_auth::credential::StoreParams {
+        known_roles: cred.known_roles.clone(),
+        max_ttl_by_role: cred.max_ttl_by_role.clone(),
+        visible_resources: None,
+        clock_skew_seconds: 60,
+    };
+    let store = wist_auth::credential::CredentialStore::open(&store_path, params)
+        .map_err(|err| anyhow::anyhow!("open credential store {}: {err}", store_path.display()))?;
+    eprintln!(
+        "[i] 凭据登记表：{}（audience={}，认识的角色 {} 个）",
+        store_path.display(),
+        cred.audience,
+        cred.known_roles.len()
+    );
+
+    Ok(Some(Arc::new(credentials::CredentialPush {
+        store,
+        audience: cred.audience.clone(),
+        push_token_hash,
+    })))
 }
 
 /// 管理面 TLS：配了 `client_ca_file` 就是 mTLS（默认严格，不允许匿名）。

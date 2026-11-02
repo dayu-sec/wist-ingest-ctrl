@@ -1,5 +1,27 @@
 # Changelog
 
+## [Unreleased]
+
+### 新增（凭据登记表 — X 侧）
+
+接收 `wist-cred` 推来的 `register` / `revoke`，把签发方的提议落到本服务的本地登记表：
+
+- `POST /api/v1/internal/credentials`：登记一条凭据，返回**裁剪后的生效值**（`effective`）；
+- `POST /api/v1/internal/credentials/{id}/revoke`：撤销（幂等，`revision` 必须递增）；
+- 新配置段 `[ctrl.credentials]`：`enabled` / `store_path` / `known_roles` / `max_ttl_by_role` /
+  `audience` / `push_token_hash`；`enabled = true` 时 `push_token_hash` **必填**（加载期校验）；
+- 语义（与 `auth-token-verification.md` §6–§7 对齐）：
+  - 只存 `sha256` 摘要，明文从不落盘；
+  - `revision` 单调，低 revision 的 register 被拒（撤销后不能复活）；
+  - 按 `known_roles` / `max_ttl_by_role` **裁剪**签发方的提议（D9）；
+  - `audience` 必须等于本服务名，否则 `400 audience_mismatch`。
+
+**通道身份是 P2 过渡**：静态服务 token（`x-wist-push-token`，只存 sha256、常数时间比较）。
+P3 换 CA-I mTLS 时只需替换 `require_push_token`，处理逻辑不动。
+
+> `wist-auth` 在本仓先用本地 `path`（需要未发布的 `credential` feature）；
+> 0.2.0 发布后改回 `version = "0.2.0"`。
+
 ## [0.2.0] - 2026-10-30
 
 ### 新增（数据面接入授权，逻辑对齐 wist-center 的控制面 link）

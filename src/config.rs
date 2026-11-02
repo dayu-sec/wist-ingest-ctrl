@@ -43,6 +43,51 @@ pub struct Ctrl {
     /// 数据面接入授权（gateway → ingest）。与 center 的 `[security] link_ttl_seconds` 同口径。
     #[serde(default)]
     pub link: LinkConfig,
+    /// 凭据登记表（验证侧）：接收 `wist-cred` 推来的 register / revoke。
+    #[serde(default)]
+    pub credentials: CredentialsConfig,
+}
+
+/// 凭据登记表（X 侧）。见 `auth-token-verification.md` §6–§7。
+///
+/// **本段开启时 `push_token_hash` 必填**（加载期校验，fail-closed）。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CredentialsConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// 摘要表落点；留空 = `<work_root>/credentials.json`。
+    #[serde(default)]
+    pub store_path: Option<PathBuf>,
+    /// 本服务认识的角色；register 时取交集（D9）。空 = 全部丢掉。
+    #[serde(default)]
+    pub known_roles: Vec<String>,
+    /// 角色 → TTL 上限（秒）。命中多条时取最小。
+    #[serde(default)]
+    pub max_ttl_by_role: std::collections::BTreeMap<String, i64>,
+    /// 本服务的名字；register 的 `audience` 必须等于它。
+    #[serde(default = "default_cred_audience")]
+    pub audience: String,
+    /// `x-wist-push-token` 的 sha256 hex。
+    /// **P2 过渡**：P3 换成 CA-I mTLS 客户端证书。
+    #[serde(default)]
+    pub push_token_hash: Option<String>,
+}
+
+impl Default for CredentialsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            store_path: None,
+            known_roles: Vec::new(),
+            max_ttl_by_role: std::collections::BTreeMap::new(),
+            audience: default_cred_audience(),
+            push_token_hash: None,
+        }
+    }
+}
+
+fn default_cred_audience() -> String {
+    "wist-ingest".to_string()
 }
 
 pub use wist_auth::AuthConfig as CtrlAuth;
