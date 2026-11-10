@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.2] - 2026-11-11
+
+### 修正（撤回 0.3.1 里把“容器监听”也做成环境变量优先的做法）
+
+0.3.1 让 `INGEST_BIND_IP` / `INGEST_PORT` / `CRED_BIND_IP` / `CRED_PORT` 覆盖
+`[ingest] bind|port` 与 `[ctrl.credentials] listen`。实测后果：`CRED_BIND_IP=127.0.0.1`
+注入后 ctrl 在容器里绑到了 **loopback**，而宿主端口映射指向容器 IP → 连接直接失败。
+
+- **容器内监听地址是应用契约**（compose 映射目标写死 `:6514` / `:19092`），不再接受环境变量覆盖。
+- 保留 `INGEST_ADVERTISE_HOST` + `INGEST_PORT`（**宿主**端口）→ `[ctrl.link] advertise`：
+  宿主端口与容器端口不一致时，交付给网关的入口才是对的；可只给其中一项。
+- 非法端口（非数字 / 0）仍是启动期报错（fail-closed）。
+
 ## [0.3.1] - 2026-11-11
 
 ### 变更（部署值改为环境变量优先）
