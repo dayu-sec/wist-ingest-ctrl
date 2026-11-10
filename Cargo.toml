@@ -1,6 +1,6 @@
 [package]
 name = "wist-ingest-ctrl"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 license = "Apache-2.0"
 description = "Control plane for the wist-ingest data plane (warp-parse TCP+TLS source)"
@@ -31,14 +31,14 @@ tower = { version = "0.5", features = ["util"] }
 # orion-variate 提供 `EnvDict` / `EnvEvaluable` / `EnvChecker`。
 orion-sec = "0.7"
 orion-variate = "0.14"
-# 共享原语：两者都已发布到 crates.io，按版本引（CI 发版，见各仓 release.yml）。
-# 本地联调可改成 path（与两者平铺在同一父目录时）：
-#wist-auth = { path = "../wist-auth", features = ["serde", "axum"] }
-#wist-pki = { path = "../wist-pki" }
-# 本地联调：验证侧凭据登记表来自 wist-auth 的 `credential` feature（未发布 0.2.0 前先走 path）。
-# 发布后改回：wist-auth = { version = "0.2.0", features = ["serde", "axum", "credential"] }
-wist-auth = { path = "../wist-auth", features = ["serde", "axum", "credential"] }
+# 共享原语：都按版本引（CI 发版，见各仓 release.yml）。
+# 本地联调可改成 path（与它们平铺在同一父目录时）。
+# `credential` = 验证侧登记表（摘要比对 / 裁剪 / 验签）；与 `wist-cred-peer` 同一口径。
+wist-auth = { version = "0.3", features = ["serde", "axum", "credential"] }
 wist-pki = "0.1.2"
+# 访问凭据（`wist-cred` 的验证方 X）：收 register/revoke、自己的摘要表、验 `wcr_…` 令牌。
+# 本服务**不再自己实现**这套（旧 `src/credentials.rs` 的推送路由 / 摘要表已删）。
+wist-cred-peer = "0.5"
 
 [dev-dependencies]
 http-body-util = "0.1"

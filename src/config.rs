@@ -43,51 +43,43 @@ pub struct Ctrl {
     /// 数据面接入授权（gateway → ingest）。与 center 的 `[security] link_ttl_seconds` 同口径。
     #[serde(default)]
     pub link: LinkConfig,
-    /// 凭据登记表（验证侧）：接收 `wist-cred` 推来的 register / revoke。
+    /// 访问凭据（`wist-cred` 的验证方 X）。不配 = 本服务不收 cred 推送、也**不认** cred 签发的令牌。
     #[serde(default)]
-    pub credentials: CredentialsConfig,
+    pub credentials: Option<CredentialsConfig>,
 }
 
-/// 凭据登记表（X 侧）。见 `auth-token-verification.md` §6–§7。
+/// 访问凭据（`wist-cred` 的验证方 X）：`[ctrl.credentials]`。
 ///
-/// **本段开启时 `push_token_hash` 必填**（加载期校验，fail-closed）。
+/// 材料与策略（identity / audience / 签发方白名单 / 角色词汇表）全在 `file` 指向的 `cred.toml` 里 ——
+/// 那份文件由 cred 的接入脚本维护、重跑会**整份重写**，所以这里不再抄一遍（抄一遍必漂）。
+/// 本段只放**本服务自己的决定**：收数监听、摘要表落点、哪些角色算 admin。
+///
+/// 运行时能力由 `wist-cred-peer` 提供（收 `register` / `revoke` + 本地验 token），
+/// 本服务不自建摘要表实现。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CredentialsConfig {
-    #[serde(default)]
-    pub enabled: bool,
-    /// 摘要表落点；留空 = `<work_root>/credentials.json`。
+    /// cred 的接入文件（接入脚本产出：`[identity]` + `[verify]` 两段）。
+    /// 相对路径按**该文件所在目录**解。
+    pub file: PathBuf,
+    /// 收数 listener：cred 往这里推摘要、并探 `GET /healthz`。
+    /// 与业务监听（`ctrl.listen`）分开：推送方证书由 CA-I 签，管理台由 web-client CA 签。
+    #[serde(default = "default_cred_listen")]
+    pub listen: String,
+    /// 摘要表落点（**只存 sha256**）；留空 = `<work_root>/.ctrl/credentials.json`。
     #[serde(default)]
     pub store_path: Option<PathBuf>,
-    /// 本服务认识的角色；register 时取交集（D9）。空 = 全部丢掉。
-    #[serde(default)]
-    pub known_roles: Vec<String>,
-    /// 角色 → TTL 上限（秒）。命中多条时取最小。
-    #[serde(default)]
-    pub max_ttl_by_role: std::collections::BTreeMap<String, i64>,
-    /// 本服务的名字；register 的 `audience` 必须等于它。
-    #[serde(default = "default_cred_audience")]
-    pub audience: String,
-    /// `x-wist-push-token` 的 sha256 hex。
-    /// **P2 过渡**：P3 换成 CA-I mTLS 客户端证书。
-    #[serde(default)]
-    pub push_token_hash: Option<String>,
+    /// 命中其中任一角色的凭据按 admin 处理，其余已登记的凭据按 viewer。
+    /// **空 = 不按角色卡**（所有已登记的凭据都是 admin）。
+    #[serde(default = "default_cred_admin_roles")]
+    pub admin_roles: Vec<String>,
 }
 
-impl Default for CredentialsConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            store_path: None,
-            known_roles: Vec::new(),
-            max_ttl_by_role: std::collections::BTreeMap::new(),
-            audience: default_cred_audience(),
-            push_token_hash: None,
-        }
-    }
+fn default_cred_listen() -> String {
+    "0.0.0.0:19092".to_string()
 }
 
-fn default_cred_audience() -> String {
-    "wist-ingest".to_string()
+fn default_cred_admin_roles() -> Vec<String> {
+    vec!["admin".to_string()]
 }
 
 pub use wist_auth::AuthConfig as CtrlAuth;

@@ -47,8 +47,10 @@ INGEST_CTRL_TOKEN=... wist-ingest-ctrl --config /etc/wist-ingest/ctrl.toml serve
 | GET | `/api/v1/data-plane/tree` | 数据面当前配置与规则的目录树（白名单：`conf/` `connectors/` `topology/` `models/` + `wparse.local.toml`） |
 | GET | `/api/v1/data-plane/file?path=…` | 读单个文本文件（拒绝 `..`/绝对路径/符号链接逃逸，单文件 ≤ 1 MiB） |
 | POST | `/api/v1/apply?restart=false` | 渲染 + 校验 + 生效（默认 `restart=true`） |
+| POST | `/api/login` | 把 cred 签发的一条 `wcr_…` 换成「你是谁、什么角色」（**免 Bearer**，令牌在 body / 头里） |
 
-除 `/healthz` 与 `/api/v1/link/redeem` 外都要求 `Authorization: Bearer <token>`。
+除 `/healthz`、`/api/v1/link/redeem` 与 `/api/login` 外都要求 `Authorization: Bearer <token>`；
+`/api/login` 只在接了 cred（配了 `[ctrl.credentials]`）时存在。
 
 ### 数据面接入授权（gateway → ingest）
 
@@ -108,6 +110,34 @@ Bearer token、落盘存 **sha256 hex**、常数时间比较、错 token 计入�
 - 失败响应：`401 missing_bearer_token` / `401 invalid_bearer_token` / `403 insufficient_scope` / `429 auth_rate_limited`（带 `Retry-After`），
   均带 `Cache-Control: no-store`；每客户端（peer IP，不信任 `X-Real-IP/X-Forwarded-For`）5 次失败 / 60s → 封 60s；
 - **mTLS 与 token 是两回事**：mTLS 给出传输身份（`/api/v1/whoami` 里的 `identity`），token 给出授权作用域（`scope`）。
+
+### 访问凭据（`wist-cred` 的验证方 X）
+
+运行时**全部来自 `wist-cred-peer`**（本服务不再自己实现摘要表 / 推送路由 / 验签）：
+
+| 面 | 监听 | 职责 |
+|---|---|---|
+| 收数 | `[ctrl.credentials] listen`（默认 `0.0.0.0:19092`） | `POST /api/v1/internal/credentials`、`POST …/{id}/revoke`、`GET /healthz`（cred 心跳）；mTLS，客户端证书由 **CA-I** 签 |
+| 管理面 | `ctrl.listen`（19091） | `Authorization: Bearer wcr_…` → 本机摘要表验 → `viewer` / `admin`；`POST /api/login` 回答“我是谁” |
+
+```toml
+[ctrl.credentials]
+file = "/opt/wist-ingest/identity/ctrl/cred/cred.toml"   # 接入脚本产出，相对路径按它所在目录解
+listen = "0.0.0.0:19092"
+# store_path = "…/.ctrl/credentials.json"                 # 留空 = <work_root>/.ctrl/credentials.json
+admin_roles = ["admin"]                                  # 命中任一的凭据 → admin；其余 → viewer
+```
+
+- **材料与策略只读 `cred.toml`**（`[identity]` + `[verify]`：证书 / audience / 签发方白名单 / 角色词汇表 / 验签）。
+  那份文件由 cred 接入脚本维护、重跑会整份重写，所以本服务**不抄一遍**（抄了必漂）。
+- 自己的决定只有三件：监听地址、摘要表落点、哪些角色算 admin。
+- **fail-fast**：配了 `[ctrl.credentials]` 但 `cred.toml` 读不到、`[verify].roles` 为空、客户端信任锚缺失、
+  证书/私钥不对 → **拒绝启动**（不会出现“管理台能进但 cred 推不进来”的半启用现场）。
+- 静态 token 与 cred 凭据**并存**：`admin_token` / `viewer_token` 照旧可用，`wcr_…` 走同一条 `Authorization` 头。
+  静态 token 不认识时才查摘要表；不认识的 `wcr_…` 仍是 `401 invalid_bearer_token`（不额外暴露是哪种凭据）。
+- 角色映射：命中 `admin_roles` → `admin`（能 `apply`），否则 `viewer`；`admin_roles = []` = 不按角色卡，一律 admin。
+- `GET /api/v1/status` 的 `credentials` 段回报 `audience` / `listen` / `registered`（当前能通过的凭据数）/ `rejected_on_load`。
+- 本服务**不自注册**：材料由 cred 的接入命令落盘；`cred.toml` 里出现 `[init]` 会被忽略。
 
 ## 安全 lint（阻止 apply）
 

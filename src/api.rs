@@ -22,8 +22,8 @@ use wist_auth::{AuthPolicy, Scope};
 pub struct AppState {
     pub cfg_path: PathBuf,
     pub auth: AuthPolicy,
-    /// 凭据推送接收（`None` = 本服务不接推送）。
-    pub credentials: Option<Arc<crate::credentials::CredentialPush>>,
+    /// `wist-cred` 验证方运行时（`[ctrl.credentials]` 未配置 = `None`：不认 `wcr_…` 令牌）。
+    pub credentials: Option<Arc<crate::credentials::Runtime>>,
 }
 
 /// 连接对端地址（TLS 路径由 accept 循环写入；明文路径用 `ConnectInfo`）。
@@ -80,31 +80,26 @@ pub(crate) fn router(state: Arc<AppState>) -> Router {
             require_admin,
         ));
 
-    // 凭据登记：**不**认管理面 Bearer，改认推送方服务 token（P2 过渡）或以后的 CA-I mTLS。
-    // 未开启（`credentials = None`）时整组路由不挂，访问即 404。
-    let internal = Router::new()
-        .route(
-            "/api/v1/internal/credentials",
-            post(crate::credentials::register_credential),
-        )
-        .route(
-            "/api/v1/internal/credentials/{id}/revoke",
-            post(crate::credentials::revoke_credential),
-        )
-        .route_layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            crate::credentials::require_push_token,
-        ));
-
-    Router::new()
+    let mut router = Router::new()
         .route("/healthz", get(healthz))
         // 数据面接入的消费通道：只认一次性接入券，**不**认管理面 Bearer。
         // 与 center 的 `link-upstream` 同一形态（接入通道不能要求先有管理面凭据）。
         .route("/api/v1/link/redeem", post(redeem_link))
         .merge(viewer)
         .merge(admin)
-        .merge(internal)
-        .with_state(state)
+        .with_state(state.clone());
+
+    if let Some(credentials) = state.credentials.as_ref() {
+        // 登录端点：把 `wcr_…` 换成「你是谁、什么角色」。
+        // 契约（含 `credential_missing` / `credential_invalid` 错误码）由 `wist-cred-peer`
+        // 统一维护，本服务不再自己实现；挂在 `/api/login`。
+        // 不传 `required_roles`：能不能进来由作用域门判，这里只回答“这张令牌是谁”。
+        router = router.nest(
+            "/api",
+            wist_cred_peer::login_router(credentials.peer(), Vec::new()),
+        );
+    }
+    router
 }
 
 async fn serve_tls(
@@ -224,8 +219,31 @@ async fn guard(
         .map(|ip| ip.to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
-    let scope =
-        wist_auth::authorize_or_response(&state.auth, required, req.headers(), &client_key)?;
+    // **先查 cred 摘要表，再查静态 token**。顺序不能反：`AuthPolicy` 会把“认不出的 token”
+    // 记成一次失败（5 次 / 60s → 429），而 `wcr_…` 对它是必然认不出的 ——
+    // 反过来的话，用凭据登录的人每请求一次就给自己记一笔失败。
+    let credential = match (
+        state.credentials.as_ref(),
+        wist_auth::bearer_token(req.headers()),
+    ) {
+        (Some(credentials), Some(token)) => credentials.scope_for(token).ok(),
+        _ => None,
+    };
+
+    let scope = match credential {
+        Some((scope, caller)) => {
+            if scope < required {
+                // 凭据有效但角色不够：403，与静态 token 的 `insufficient_scope` 同形。
+                return Err(wist_auth::error_response(wist_auth::AuthError::Forbidden));
+            }
+            req.extensions_mut().insert(caller);
+            scope
+        }
+        // 不认识的令牌（包括无效的 `wcr_…`）仍走静态那条路：401 / 限流口径不变。
+        None => {
+            wist_auth::authorize_or_response(&state.auth, required, req.headers(), &client_key)?
+        }
+    };
 
     req.extensions_mut().insert(scope);
     Ok(next.run(req).await)
@@ -234,6 +252,7 @@ async fn guard(
 /// 回显本次连接的**传输身份**（mTLS）与**授权作用域**（token）。
 async fn whoami(
     scope: Extension<Scope>,
+    caller: Option<Extension<crate::credentials::Caller>>,
     peer: Option<Extension<wist_pki::PeerIdentity>>,
 ) -> Json<serde_json::Value> {
     Json(json!({
@@ -241,6 +260,12 @@ async fn whoami(
         "scope": scope.0.as_str(),
         "can_apply": scope.0 == Scope::Admin,
         "identity": peer.map(|Extension(id)| id),
+        // 通过 cred 凭据进来时回显「是谁」；静态 token 没有主体概念，为 null。
+        "subject": caller.as_ref().map(|Extension(caller)| caller.subject.clone()),
+        "roles": caller.as_ref().map(|Extension(caller)| caller.roles.clone()),
+        "credential_id": caller
+            .as_ref()
+            .map(|Extension(caller)| caller.credential_id.clone()),
     }))
 }
 
@@ -292,6 +317,15 @@ async fn status(
                 "allow_unauthenticated": t.allow_unauthenticated,
             })),
             "gateways": gateways,
+            // 访问凭据（`wist-cred` 验证方）：登记了几条 = 现在能通过的 token 数。
+            "credentials": state.credentials.as_ref().map(|credentials| {
+                json!({
+                    "audience": credentials.peer().config().audience,
+                    "listen": credentials.listen().to_string(),
+                    "registered": credentials.registered(),
+                    "rejected_on_load": credentials.rejected_on_load(),
+                })
+            }),
             "lint": findings,
             "state": apply::load_state(&cfg.ctrl.work_root),
         })),

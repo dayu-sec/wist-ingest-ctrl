@@ -1,26 +1,35 @@
 # Changelog
 
-## [Unreleased]
+## [0.3.0] - 2026-11-11
 
-### 新增（凭据登记表 — X 侧）
+### 变更（访问凭据改用 `wist-cred-peer`，删掉自研实现）
 
-接收 `wist-cred` 推来的 `register` / `revoke`，把签发方的提议落到本服务的本地登记表：
+验证方（X）那套不再手写：`src/credentials.rs` 里自建的推送路由、摘要表，以及
+`[ctrl.credentials]` 的 `enabled` / `audience` / `allowed_issuers` / `known_roles` /
+`max_ttl_by_role` 全部删除，运行时交给 `wist-cred-peer` 0.5
+（与 `wist-center` / `wist-field-api` 同一份契约）：
 
-- `POST /api/v1/internal/credentials`：登记一条凭据，返回**裁剪后的生效值**（`effective`）；
-- `POST /api/v1/internal/credentials/{id}/revoke`：撤销（幂等，`revision` 必须递增）；
-- 新配置段 `[ctrl.credentials]`：`enabled` / `store_path` / `known_roles` / `max_ttl_by_role` /
-  `audience` / `push_token_hash`；`enabled = true` 时 `push_token_hash` **必填**（加载期校验）；
-- 语义（与 `auth-token-verification.md` §6–§7 对齐）：
-  - 只存 `sha256` 摘要，明文从不落盘；
-  - `revision` 单调，低 revision 的 register 被拒（撤销后不能复活）；
-  - 按 `known_roles` / `max_ttl_by_role` **裁剪**签发方的提议（D9）；
-  - `audience` 必须等于本服务名，否则 `400 audience_mismatch`。
+- **收数**：独立 mTLS listener（`[ctrl.credentials] listen`，默认 `0.0.0.0:19092`）挂
+  `POST /api/v1/internal/credentials`、`POST …/{id}/revoke`、`GET /healthz`；
+  客户端证书由 CA-I 签，应用层只做 `allowed_issuers` 白名单。
+- **验 token（此前缺失的一环）**：管理面 `Authorization: Bearer wcr_…` 在静态
+  `admin_token` / `viewer_token` 都不认时，查本机摘要表 —— 角色命中 `admin_roles` 给 admin，
+  否则 viewer；不认识的令牌仍是 `401 invalid_bearer_token`（不暴露是哪种凭据）。
+- **登录**：`POST /api/login` 由 `wist_cred_peer::login_router` 提供
+  （错误码 `credential_missing` / `credential_invalid` / `role_required` 是对外契约）。
+- **材料与策略只读 `cred.toml`**：`[ctrl.credentials]` 只剩 `file` / `listen` / `store_path` /
+  `admin_roles`。配了就 fail-fast 校验（文件、角色词汇表、客户端信任锚、证书），不成立即拒启动。
+- `GET /api/v1/status` 增 `credentials` 段（audience / listen / registered / rejected_on_load）。
+- `/api/v1/whoami` 通过 cred 凭据进来时额外回显 `subject` / `roles` / `credential_id`。
+- 依赖：`wist-auth` 从本地 path 改回 `0.3`（`credential` feature 已发布），
+  新增 `wist-cred-peer = "0.5"`。
 
-**通道身份是 P2 过渡**：静态服务 token（`x-wist-push-token`，只存 sha256、常数时间比较）。
-P3 换 CA-I mTLS 时只需替换 `require_push_token`，处理逻辑不动。
+### 升级注意
 
-> `wist-auth` 在本仓先用本地 `path`（需要未发布的 `credential` feature）；
-> 0.2.0 发布后改回 `version = "0.2.0"`。
+- `[ctrl.credentials]` 的旧字段不再被识别（除 `file` / `listen` / `store_path` / `admin_roles` 外
+  都会报错）：audience / 签发方 / 角色那些值搬到 cred 接入命令产出的 `cred.toml` 里。
+- 需要 `wist-cred` 侧把 ingest 登记成验证方（audience = `wist-ingest`，收数地址指向 listen 端口），
+  并把接入命令产出的 `cred.toml` + 证书目录挂进 ctrl 容器。
 
 ## [0.2.0] - 2026-10-30
 

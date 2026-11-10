@@ -39,6 +39,23 @@ ttl_seconds = 900
 # 管理台会提示先配这一项。
 # advertise = "ingest.example.com:6514"
 
+# 访问凭据（`wist-cred` 的验证方 X）。**整段注释掉 = 不接 cred**。
+#
+# 接上之后有两件事：
+#   1. 在 `listen` 上收 cred 推来的授权记录（mTLS，客户端证书由 CA-I 签），只落 sha256；
+#   2. 管理面除了 `[ctrl.auth]` 的静态 token，也认 cred 签发的 `wcr_…`。
+#
+# 材料与策略全在 cred 接入脚本产出的 `cred.toml` 里（identity / audience / 签发方 / 角色），
+# 那份文件重跑接入会**整份重写** —— 不要把它里面的值抄到这里。
+# [ctrl.credentials]
+# file = "/opt/wist-ingest/identity/ctrl/cred/cred.toml"
+# # cred 推摘要的 listener（与业务监听分开：推送方证书是 CA-I，管理台是 web-client CA）。
+# listen = "0.0.0.0:19092"
+# # 摘要表落点；留空 = <work_root>/.ctrl/credentials.json。
+# store_path = "/opt/wist-ingest/data-plane-run/work/.ctrl/credentials.json"
+# # 命中其中任一角色 → admin；其余已登记的凭据 → viewer。空 = 不按角色卡。
+# admin_roles = ["admin"]
+
 [ingest]
 bind = "0.0.0.0"
 port = 6514
