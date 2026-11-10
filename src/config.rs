@@ -1,6 +1,6 @@
 use std::path::{Component, Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use orion_sec::sec::NoSecConv;
 use orion_sec::{SecFileFmt, load_sec_dict, load_secfile_by};
 use orion_variate::vars::{EnvChecker, EnvDict, EnvEvaluable, ValueType};
@@ -218,6 +218,25 @@ impl Endpoint {
     }
 }
 
+/// 把 `host:port`（含 `[v6]:port`）拆开；拆不开时保持原串当 host、端口回落 0 之外的默认。
+///
+/// 只给环境变量覆盖用：`CRED_BIND_IP` / `CRED_PORT` 可以只改其中一半。
+fn split_host_port(listen: &str) -> (String, u16) {
+    if let Some(rest) = listen.strip_prefix('[')
+        && let Some((host, tail)) = rest.split_once(']')
+        && let Some(port) = tail.strip_prefix(':').and_then(|port| port.parse().ok())
+    {
+        return (format!("[{host}]"), port);
+    }
+    match listen.rsplit_once(':') {
+        Some((host, port)) => match port.parse() {
+            Ok(port) => (host.to_string(), port),
+            Err(_) => (listen.to_string(), 0),
+        },
+        None => (listen.to_string(), 0),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Level {
     Error,
@@ -307,7 +326,57 @@ impl Config {
         let mut cfg: Config =
             toml::from_str(&text).with_context(|| format!("parse config {}", path.display()))?;
         cfg.expand_secrets()?;
+        cfg.apply_deployment_env(|key| std::env::var(key).ok())?;
         Ok(cfg)
+    }
+
+    /// 部署值**只有一个真源**：栈变量 → `.env` → compose 注入的环境变量。
+    ///
+    /// 配置文件里的 `[ingest] bind/port`、`[ctrl.credentials] listen`、`[ctrl.link] advertise`
+    /// 只是**回落默认值**。没有这条会静默漂：栈侧把 `INGEST_PORT` 改成 16514，
+    /// 配置里还写着 6514，于是渲染出的数据面配置、以及交给网关的入口会一起错。
+    ///
+    /// 与 `admin_token` 同口径：**环境变量优先**，且空串等于没设。
+    fn apply_deployment_env(&mut self, env: impl Fn(&str) -> Option<String>) -> Result<()> {
+        let get = |key: &str| -> Option<String> {
+            env(key)
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        };
+        let port_of = |key: &str, raw: &str| -> Result<u16> {
+            let port: u16 = raw
+                .parse()
+                .with_context(|| format!("{key} 不是合法端口：{raw:?}"))?;
+            if port == 0 {
+                bail!("{key} 不能是 0");
+            }
+            Ok(port)
+        };
+
+        if let Some(bind) = get("INGEST_BIND_IP") {
+            self.ingest.bind = bind;
+        }
+        if let Some(raw) = get("INGEST_PORT") {
+            self.ingest.port = port_of("INGEST_PORT", &raw)?;
+        }
+        // advertise 的端口跟 `ingest.port` 同一个真源（入口端口就是数据面端口）。
+        if let Some(host) = get("INGEST_ADVERTISE_HOST") {
+            self.ctrl.link.advertise = Some(format!("{host}:{}", self.ingest.port));
+        }
+        if let Some(credentials) = self.ctrl.credentials.as_mut() {
+            let bind = get("CRED_BIND_IP");
+            let raw_port = get("CRED_PORT");
+            if bind.is_some() || raw_port.is_some() {
+                let (host, port) = split_host_port(&credentials.listen);
+                let host = bind.unwrap_or(host);
+                let port = match raw_port {
+                    Some(raw) => port_of("CRED_PORT", &raw)?,
+                    None => port,
+                };
+                credentials.listen = format!("{host}:{port}");
+            }
+        }
+        Ok(())
     }
 
     /// 展开 token 里的 `${VAR}` / `${VAR:default}`（env 优先，其次密钥文件）。
@@ -1176,5 +1245,102 @@ client_ca = "/data/identity/ingest/client-ca.pem"
         assert!(cfg.gateway("a").is_some());
         assert!(cfg.gateway("b").is_some_and(|gw| !gw.enabled));
         assert!(cfg.gateway("c").is_none());
+    }
+
+    // ── 部署值：环境变量优先于配置文件（与 admin_token 同口径）──────────
+
+    fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let pairs: Vec<(String, String)> = pairs
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        move |key: &str| {
+            pairs
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.clone())
+        }
+    }
+
+    #[test]
+    fn deployment_env_overrides_the_ingest_bind_and_port() {
+        let mut cfg = parse("");
+        cfg.apply_deployment_env(env(&[
+            ("INGEST_BIND_IP", "10.0.0.5"),
+            ("INGEST_PORT", "16514"),
+        ]))
+        .expect("apply");
+        assert_eq!(cfg.ingest.bind, "10.0.0.5");
+        assert_eq!(cfg.ingest.port, 16514);
+    }
+
+    #[test]
+    fn blank_or_missing_env_keeps_the_file_value() {
+        let mut cfg = parse("");
+        let port = cfg.ingest.port;
+        cfg.apply_deployment_env(env(&[("INGEST_BIND_IP", "  ")]))
+            .expect("apply");
+        assert_eq!(cfg.ingest.bind, parse("").ingest.bind);
+        assert_eq!(cfg.ingest.port, port);
+    }
+
+    #[test]
+    fn a_bad_port_env_is_an_error_not_a_silent_fallback() {
+        let mut cfg = parse("");
+        assert!(
+            cfg.apply_deployment_env(env(&[("INGEST_PORT", "6514abc")]))
+                .is_err()
+        );
+
+        let mut cfg = parse("");
+        assert!(
+            cfg.apply_deployment_env(env(&[("INGEST_PORT", "0")]))
+                .is_err(),
+            "0 会让 wparse 绑随机端口，必须拦"
+        );
+    }
+
+    #[test]
+    fn advertise_uses_the_host_env_plus_the_effective_port() {
+        let mut cfg = parse("");
+        cfg.apply_deployment_env(env(&[
+            ("INGEST_PORT", "16514"),
+            ("INGEST_ADVERTISE_HOST", "ingest.example.com"),
+        ]))
+        .expect("apply");
+        let endpoint = cfg.data_endpoint();
+        assert_eq!(endpoint.host, "ingest.example.com");
+        assert_eq!(endpoint.port, 16514, "端口跟 ingest.port 同一个真源");
+        assert!(cfg.data_endpoint_configured());
+    }
+
+    #[test]
+    fn the_credential_listener_takes_each_half_from_env() {
+        let extra = "[ctrl.credentials]\nfile = \"/c/cred.toml\"\nlisten = \"0.0.0.0:19092\"\n";
+        let mut cfg = parse(extra);
+        cfg.apply_deployment_env(env(&[("CRED_PORT", "29092")]))
+            .expect("apply");
+        assert_eq!(
+            cfg.ctrl.credentials.as_ref().expect("creds").listen,
+            "0.0.0.0:29092",
+            "只给端口时主机部分保持原样"
+        );
+
+        let mut cfg = parse(extra);
+        cfg.apply_deployment_env(env(&[("CRED_BIND_IP", "127.0.0.1")]))
+            .expect("apply");
+        assert_eq!(
+            cfg.ctrl.credentials.as_ref().expect("creds").listen,
+            "127.0.0.1:19092"
+        );
+    }
+
+    #[test]
+    fn cred_env_is_ignored_when_credentials_are_not_configured() {
+        let mut cfg = parse("");
+        assert!(cfg.ctrl.credentials.is_none());
+        cfg.apply_deployment_env(env(&[("CRED_PORT", "29092")]))
+            .expect("apply");
+        assert!(cfg.ctrl.credentials.is_none());
     }
 }

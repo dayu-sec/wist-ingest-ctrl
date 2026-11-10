@@ -32,6 +32,22 @@ INGEST_CTRL_TOKEN=... wist-ingest-ctrl --config /etc/wist-ingest/ctrl.toml serve
 
 配置示例见 `examples/ingest.toml`。
 
+## 部署值（环境变量优先）
+
+栈把部署值从 `.env` 注入容器环境；ctrl 侧**环境变量优先**，配置文件里那几行只是回落默认值
+（与 `admin_token` 同口径，空串等于没设）：
+
+| 环境变量 | 覆盖 | 说明 |
+|---|---|---|
+| `INGEST_BIND_IP` | `[ingest] bind` | 数据面监听地址 |
+| `INGEST_PORT` | `[ingest] port` | 数据面端口（也决定 advertise 的端口） |
+| `INGEST_ADVERTISE_HOST` | `[ctrl.link] advertise` 的 host | 端口取 `INGEST_PORT`；空 = 由 bind 推导 |
+| `CRED_BIND_IP` / `CRED_PORT` | `[ctrl.credentials] listen` 的 host / 端口 | 可只给一半；未配 `[ctrl.credentials]` 时忽略 |
+
+为什么不让配置文件说了算：栈侧把 `INGEST_PORT` 改成 16514、配置里还写着 6514 时，
+渲染出的数据面配置与交给网关的入口会**一起错，而且不报错**。
+非法值（端口非数字 / 0）→ **启动期直接报错**（fail-closed），不静默回落。
+
 ## 管理面
 
 | 方法 | 路径 | 说明 |

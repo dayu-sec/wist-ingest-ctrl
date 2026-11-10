@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.3.1] - 2026-11-11
+
+### 变更（部署值改为环境变量优先）
+
+- 新增 `INGEST_BIND_IP` / `INGEST_PORT` / `INGEST_ADVERTISE_HOST` / `CRED_BIND_IP` /
+  `CRED_PORT`，分别覆盖 `[ingest] bind|port`、`[ctrl.link] advertise` 的 host、
+  `[ctrl.credentials] listen`。配置文件里那几行变成**回落默认值**。
+  原因：栈侧改了端口而配置里还写着旧值时不报错，渲染出的数据面配置和交给网关的入口会一起错。
+- 非法值（端口非数字 / 0）→ 启动期报错（fail-closed），不静默回落。
+
 ## [0.3.0] - 2026-11-11
 
 ### 变更（访问凭据改用 `wist-cred-peer`，删掉自研实现）
